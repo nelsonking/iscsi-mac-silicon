@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<style>
+ body { font: 13px -apple-system, "PingFang SC", sans-serif; color: #1c1c1e; margin: 0; padding: 4px 2px; line-height: 1.55; }
+ h2 { font-size: 15px; margin: 0 0 8px; }
+ .warn { background: #fff4e5; border: 1px solid #ffcf8f; border-radius: 8px; padding: 10px 12px; margin: 12px 0; }
+ .warn b { color: #b25e00; }
+ code { background: #eee; border-radius: 4px; padding: 1px 5px; font-family: "SF Mono", Menlo, monospace; }
+ ul { margin: 6px 0; padding-left: 20px; }
+ .sub { color: #666; }
+ @media (prefers-color-scheme: dark){ body{color:#eee;} code{background:#333;} .warn{background:#3a2c14;border-color:#6b4e1e;} .sub{color:#aaa;} }
+</style></head><body>
+<h2>iSCSI for Apple Silicon</h2>
+<p>把远程 iSCSI 存储挂载成 Mac 上的原生磁盘。本安装包会安装内核扩展、后台服务、命令行工具与图形界面 App。<br>
+<span class="sub">Mount remote iSCSI storage as native disks on your Mac. This installs the kernel extension, background service, CLI, and the GUI app.</span></p>
+
+<div class="warn">
+<b>⚠ 安装前必须先关闭 SIP（系统完整性保护）。</b>
+本工具依赖第三方内核扩展，Apple 要求先降低安全策略。<br>
+<b>Before installing you must disable SIP.</b> This tool relies on a third-party kernel extension, which Apple requires a lowered security policy to load.
+<ul>
+<li>关机 → 长按电源键进入恢复模式 → 终端 → 运行 <code>csrutil disable</code></li>
+<li>在「启动安全性实用工具」里选择「降低安全性」并允许被认可开发者的内核扩展</li>
+<li>重启后再运行本安装包</li>
+</ul>
+安装完成后，打开 <b>iSCSI</b> App，内置的设置向导会带你完成扩展批准（可能需要重启一次）。<br>
+<span class="sub">After installing, open the <b>iSCSI</b> app — its built-in setup guide finishes extension approval (one reboot may be needed).</span>
+</div>
+</body></html>

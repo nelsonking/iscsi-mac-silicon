@@ -1,0 +1,69 @@
+#!/bin/bash
+# postinstall — make the initiator usable immediately after the package installs.
+# Runs as root. It (re)loads the kext, (re)starts the daemon, installs a
+# passwordless sudoers rule for iscsictl (so the GUI needs no password prompts),
+# and fixes ownership.
+set -u
+
+KEXT_ID="com.github.iscsi-osx.iSCSIInitiator"
+KEXT="/Library/Extensions/iSCSIInitiator.kext"
+DAEMON_PLIST="/Library/LaunchDaemons/com.github.iscsi-osx.iscsid.plist"
+DAEMON_LABEL="com.github.iscsi-osx.iscsid"
+
+echo "iSCSI: fixing ownership…"
+chown -R root:wheel "$KEXT" /Library/Frameworks/iSCSI.framework 2>/dev/null || true
+chown root:wheel /usr/local/libexec/iscsid /usr/local/bin/iscsictl "$DAEMON_PLIST" 2>/dev/null || true
+chmod 755 /usr/local/libexec/iscsid /usr/local/bin/iscsictl 2>/dev/null || true
+chmod 644 "$DAEMON_PLIST" 2>/dev/null || true
+
+# Passwordless sudoers rule for the control tool (admins only). This is what
+# lets the app connect/disconnect with zero password prompts. Remove the file
+# to revoke. Validated with visudo -c before installing.
+SUDOERS="/etc/sudoers.d/iscsi-mac-silicon"
+TMP="$(mktemp)"
+cat > "$TMP" <<'EOF'
+# Installed by iSCSI for Apple Silicon.
+# Lets admin users drive the iSCSI control tool without a password prompt.
+# Delete this file to revoke.
+%admin ALL=(root) NOPASSWD: /usr/local/bin/iscsictl, /usr/bin/kmutil load -p /Library/Extensions/iSCSIInitiator.kext, /bin/launchctl *
+EOF
+if visudo -cf "$TMP" >/dev/null 2>&1; then
+  install -m 0440 -o root -g wheel "$TMP" "$SUDOERS"
+  echo "iSCSI: installed sudoers rule $SUDOERS"
+else
+  echo "iSCSI: WARNING sudoers rule failed validation; skipping (app will prompt for auth)."
+fi
+rm -f "$TMP"
+
+echo "iSCSI: (re)starting daemon…"
+launchctl bootout system "$DAEMON_PLIST" 2>/dev/null || true
+launchctl bootstrap system "$DAEMON_PLIST" 2>/dev/null || true
+launchctl kickstart -k "system/$DAEMON_LABEL" 2>/dev/null || true
+
+echo "iSCSI: loading kernel extension…"
+if kmutil showloaded 2>/dev/null | grep -q "$KEXT_ID"; then
+  echo "iSCSI: kext already loaded."
+else
+  if ! kmutil load -p "$KEXT" 2>&1; then
+    cat <<'NOTE'
+------------------------------------------------------------------
+iSCSI: the kernel extension could not be loaded automatically.
+This is expected on the FIRST install on Apple Silicon.
+
+Open the iSCSI app from /Applications — its built-in setup guide
+will walk you through approving the extension in System Settings
+and (if needed) lowering the security policy. One reboot may be
+required. After that everything loads automatically.
+------------------------------------------------------------------
+NOTE
+  fi
+fi
+
+# Launch the app so the user lands in the setup guide right away.
+APP="/Applications/iSCSI.app"
+if [ -d "$APP" ]; then
+  USER_UID="$(stat -f %u /dev/console 2>/dev/null || echo 501)"
+  launchctl asuser "$USER_UID" open "$APP" 2>/dev/null || true
+fi
+
+exit 0

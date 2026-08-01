@@ -1,0 +1,48 @@
+name: Build
+
+on:
+  push:
+    branches: [master, main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14        # Apple Silicon runner
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          swiftc --version
+          uname -m
+
+      - name: Build kext + user tools
+        run: ./build_all.sh
+
+      - name: Build SwiftUI app
+        run: cd App && ./build_app.sh
+
+      - name: Build installer (.pkg + .dmg)
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          [ -z "$VERSION" ] && VERSION="0.0.0-ci"
+          cd Installer && ./build_installer.sh "$VERSION"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: iSCSI-for-Apple-Silicon
+          path: |
+            build/*.dmg
+            build/*.pkg
+          if-no-files-found: warn
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            build/*.dmg
+            build/*.pkg

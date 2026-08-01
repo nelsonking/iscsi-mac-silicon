@@ -1,0 +1,168 @@
+.\" (c) 2013-2015 Nareg Sinenian. All rights reserved.
+.\" This file is the UNIX man page for the iscsictl command-line utility."
+.Dd July 23, 2016
+.Dt ISCSICTL 8
+.Os "Mac OS X"
+.Sh NAME
+.Nm iscsictl
+.Nd iSCSI initiator configuration and management tool.
+.Sh SYNOPSIS
+.Nm
+add target
+.Ar target,portal
+.Op Fl interface Ar interface
+.Nm
+remove target
+.Ar target
+.Op , Ar portal
+
+.Nm
+login
+.Ar " target" Op , Ar portal
+.Nm
+logout
+.Ar target Op , Ar portal
+
+.Nm
+modify initiator-config
+.Op ...
+.Nm
+modify target-config
+.Ar target Op , Ar portal
+.Op ...
+.Nm
+modify discovery-config
+.Op ...
+
+.Nm
+list initiator-config
+.Nm
+list target-config
+.Ar target
+.Nm
+list discovery-config
+
+.Nm
+add discovery-portal
+.Ar portal
+.Op Fl interface Ar interface
+.Nm
+remove discovery-portal
+.Ar portal
+
+.Nm
+list targets
+.Nm
+list luns
+
+.Sh DESCRIPTION
+The
+.B iscsictl
+utility is used to configure the iSCSI initiator and manage sessions.  Users may login or logout of targets after they have been defined with appropriate portals and optional authentication method, session parameters and connection parameters.  Unprivileged users cannot perform add, remove and modify operations.
+.Pp
+The subcommands are as follows:
+.Bl -tag -width Ds
+.It add
+Adds an entity to the specified database.
+.It modify
+Modifies an existing entity in the specified database.
+.It remove
+Removes an existing entity from the specified database.
+.It list
+Lists entities in the specified database.
+.It login
+Logs into a target or connection.
+.It logout
+Logs out of a target or connection.
+.El
+.Pp
+.Ar target
+must be an iSCSI Qualified Name (IQN) as defined in RFC3720.  The
+.Ar portal
+must be a valid IP address (version 4 or 6) or a valid DNS name.  If a port other than 3620 is used, the
+.Ar portal
+can include a port number (e.g., <address:port>). The
+.Ar interface
+when specified must be a valid network interface (i.e., as listed by ifconfig). Otherwise the first available interface that supports the specified protocol is automatically used.
+.Pp
+If multiple connections are to be used with a single target, it is important to indicate the interfaces to be used in order to prevent conflicts.
+.Pp
+If the
+.Ar portal
+is omitted where optional, the command acts on all portals.  For example, when logging into or out of a target, a specific portal can be used otherwise the initiator will login to or logout of all portals.  Similarly, if a
+.Ar portal
+is specified for a remove operation, only that portal is removed from the database.  If omitted, the target including all portals are removed.
+.Pp
+The following options can be used to modify initiator-config:
+.Bl -tag -width Ds
+.It Fl node-name Ar initiator_IQN
+The initiator's iSCSI qualified name (IQN) per RFC3720.
+.It Fl node-alias Ar alias
+An alias to used for the initiator (presented to the target during login).
+.It Fl authentication Ar method
+The authentication method to use. Possible values are either None or CHAP.
+.It Fl CHAP-name Ar name
+The CHAP user name to use for initiator authentication. This name is presented to the target for during the login phase if authentication is enabled.
+.It Fl CHAP-secret
+The CHAP secret to use for initiator authentication. The secret has a maximum length of 256 characters. The user will be prompted for the password when this option is used.
+.El
+.Pp
+The following options can be used to modify target-config:
+.Bl -tag -width Ds
+.It Fl auto-login Ar enable
+Specifies whether the iSCSI daemon should login to the target upon startup. Possible values for
+.Ar enable
+are enable or disable.
+.It Fl persistent Ar enable
+Specifies whether the iSCSI daemon should reconnect to the target in the event of a network interruption or connection timeout. Possible values for
+.Ar enable
+are enable or disable.
+.It Fl MaxConnections Ar max_connections
+The maximum number of simultaneous connections allowed for this target.
+.It Fl ErrorRecoveryLevel Ar error_level
+The error recovery level for the session associated with this target. Possible values for
+.Ar error_level
+are either 0, 1, or 2.
+.It Fl HeaderDigest Ar digest
+Specifies the type of header digest to use. Possible values for
+.Ar digest
+are None or CRC32C
+.It Fl DataDigest Ar digest
+Specifies the type of data digest to use. Possible values for
+.Ar digest
+are None or CRC32C.
+.It Fl CHAP-name Ar name
+The CHAP user name to use for target authentication. This name is presented to the initiator for during the login phase if authentication is enabled.
+.It Fl CHAP-secret
+The CHAP secret to use for target authentication. The secret has a maximum length of 256 characters. The user will be prompted for the password when this option is used.
+.El
+.Pp
+The following options can be used to modify discovery-config:
+.Bl -tag -width Ds
+.It Fl SendTargets Ar enable
+Specifies whether SendTargets discovery should be used. Possible values for
+.Ar enable
+are enable or disable.
+.It Fl interval Ar interval
+Specifies the discovery interval in seconds.
+.El
+.Pp
+.Pp
+.Sh FILES
+.Bl -tag -width Ds -compact
+.It Pa /Library/Preferences/com.github.iscsi-osx.iSCSIInitiator.plist
+Initiator, targets and discovery configuration file.  Stores the initiator name and alias, a list of defined targets, their associated portals, authentication parameters, session-wide and connection-wide options, discovery portals and settings and a list of discovered targets.  Superuser access is required to edit this file.
+.Pp
+.Sh EXAMPLES
+.Bl -tag -width Ds -compact
+iscsictl add target iqn.2015-01.com.example:target,192.168.1.100:3260 -interface en0
+.Pp
+iscsictl login iqn.2015-01.com.example:target,192.168.1.1.100
+.Pp
+iscsictl logout target iqn.2015-01.com.example:target
+.Pp
+.Sh SEE ALSO
+.Xr iscsid 8
+.Sh AUTHORS
+.An Nareg Sinenian
+.Aq nareg@alum.mit.edu

@@ -1,0 +1,21 @@
+# Build output
+build/
+App/build/
+Installer/stage/
+*.dmg
+*.pkg
+
+# Toolchain / logs
+*.log
+build/obj/
+build/uobj/
+*.o
+*.swiftmodule
+
+# macOS
+.DS_Store
+*.xcuserstate
+xcuserdata/
+
+# Backups from the CLT modulemap fix
+*.modulemap.bak
