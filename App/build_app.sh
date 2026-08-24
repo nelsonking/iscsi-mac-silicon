@@ -42,6 +42,7 @@ iconutil -c icns build/AppIcon.iconset -o "$BUNDLE/Contents/Resources/AppIcon.ic
 echo ">> Compiling Swift sources…"
 swiftc -O -target "$ARCH_TARGET" \
     -framework SwiftUI -framework AppKit -framework Combine \
+    -framework IOKit -framework CoreFoundation \
     Sources/*.swift \
     -o "$BUNDLE/Contents/MacOS/${APP_NAME}"
 

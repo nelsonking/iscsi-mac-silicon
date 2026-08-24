@@ -127,8 +127,11 @@ void iSCSIDAUnmountForTarget(DASessionRef session,
     opContext->successCount = 0;
     opContext->options = options;
     
-    // Queue unmount all IOMedia objects
-    if(target != IO_OBJECT_NULL)
+    // Queue unmount all IOMedia objects. Guard on targetObj (the io_object_t we
+    // just looked up), not on target (an iSCSITargetRef CF pointer that is never
+    // NULL) — otherwise we apply the callback to an invalid entry when the IQN
+    // has no matching IORegistry node.
+    if(targetObj != IO_OBJECT_NULL)
         iSCSIIORegistryIOMediaApplyFunction(targetObj,&iSCSIDAUnmountApplierFunc,opContext);
 }
 

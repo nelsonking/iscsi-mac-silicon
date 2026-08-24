@@ -46,6 +46,12 @@ final class ISCSIController: ObservableObject {
 
     func remove(_ id: UUID) {
         if rt(id).isConnected { disconnect(id) }
+        // Purge the target from the daemon's preference store too; otherwise
+        // "iscsictl list targets" and a relaunch of the App keep showing it.
+        // Safe to do here because disconnect() above already logged out.
+        if let t = targets.first(where: { $0.id == id }) {
+            _ = Shell.runPrivileged([Self.iscsictl, "remove", "target", t.ctlTarget], timeout: 15)
+        }
         targets.removeAll { $0.id == id }
         runtime[id] = nil
         TargetStorage.save(targets)
@@ -173,34 +179,12 @@ final class ISCSIController: ObservableObject {
                      fs: mountInfo?.fs, total: mountInfo?.total ?? 0, used: mountInfo?.used ?? 0)
     }
 
-    /// Scan external physical disks for one whose transport is iSCSI.
+    /// Find the iSCSI-backed disk for a target by matching its IQN against the
+    /// IORegistry (HBA → target entry → whole-disk IOMedia → BSD name). This
+    /// binds each target to its own disk so disconnect/unmount never touches
+    /// another target's volume. Returns nil if the LUN hasn't attached yet.
     nonisolated static func findDisk(for t: Target) -> String? {
-        let list = Shell.run("/usr/sbin/diskutil", ["list", "-plist", "physical"], timeout: 12)
-        guard let data = list.out.data(using: .utf8),
-              let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any],
-              let disks = plist["AllDisksAndPartitions"] as? [[String: Any]] else {
-            return fallbackFindDisk()
-        }
-        for d in disks {
-            guard let dev = d["DeviceIdentifier"] as? String else { continue }
-            let info = Shell.run("/usr/sbin/diskutil", ["info", "-plist", dev], timeout: 8)
-            guard let idata = info.out.data(using: .utf8),
-                  let ip = try? PropertyListSerialization.propertyList(from: idata, options: [], format: nil) as? [String: Any] else { continue }
-            let proto = (ip["BusProtocol"] as? String ?? "") + (ip["MediaType"] as? String ?? "")
-            if proto.lowercased().contains("iscsi") { return dev }
-        }
-        return fallbackFindDisk()
-    }
-
-    /// If diskutil doesn't tag the protocol, fall back to the newest external disk.
-    nonisolated private static func fallbackFindDisk() -> String? {
-        let r = Shell.run("/usr/sbin/diskutil", ["list", "external", "physical"], timeout: 8)
-        let lines = r.out.split(separator: "\n")
-        var last: String? = nil
-        for line in lines where line.hasPrefix("/dev/disk") {
-            last = String(line.dropFirst("/dev/".count)).split(separator: " ").first.map(String.init)
-        }
-        return last
+        IOKitDiskFinder.findDiskForIQN(t.iqn)
     }
 
     struct MountInfo { let mount: String?; let volume: String?; let fs: String?; let total: Int64; let used: Int64 }

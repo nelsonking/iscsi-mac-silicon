@@ -756,12 +756,16 @@ IOReturn iSCSIHBAUserClient::ReleaseConnection(iSCSIHBAUserClient * target,
     ConnectionIdentifier connectionCount = 0;
     
     if(session) {
-        // Iterate over list of connections to see how many are valid
-        for(ConnectionIdentifier connectionId = 0; connectionId < kiSCSIMaxConnectionsPerSession; connectionId++)
-            if(session->connections[connectionId])
+        // Iterate over list of connections to see how many are valid.
+        // Use a distinct loop variable so we don't shadow the function's
+        // connectionId parameter — otherwise ReleaseConnection below receives
+        // the loop's terminal value (kiSCSIMaxConnectionsPerSession, out of
+        // range) instead of the caller's connectionId.
+        for(ConnectionIdentifier cid = 0; cid < kiSCSIMaxConnectionsPerSession; cid++)
+            if(session->connections[cid])
                 connectionCount++;
     }
-    
+
     if(connectionCount == 1)
         target->provider->ReleaseSession(sessionId);
     else
