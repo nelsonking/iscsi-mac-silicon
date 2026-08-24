@@ -1690,8 +1690,11 @@ errno_t iSCSIVirtualHBA::CreateConnection(SessionIdentifier sessionId,
     sock_setsockopt(newConn->socket,SOL_SOCKET,SO_SNDTIMEO,(const void*)&timeout,sizeof(struct timeval));
     sock_setsockopt(newConn->socket,SOL_SOCKET,SO_RCVTIMEO,(const void*)&timeout,sizeof(struct timeval));
 
-    // Initialize queue that keeps track of connection speed
-    memset(newConn->bytesPerSecondHistory,0,sizeof(UInt8)*newConn->kBytesPerSecAvgWindowSize);
+    // Initialize queue that keeps track of connection speed. Clear the whole
+    // array: bytesPerSecondHistory is UInt32[30] (120 bytes), so the previous
+    // sizeof(UInt8)*N only zeroed 30 bytes and left 90 bytes uninitialized,
+    // corrupting the moving-average/peak calculation.
+    memset(newConn->bytesPerSecondHistory,0,sizeof(newConn->bytesPerSecondHistory));
     newConn->bytesPerSecHistoryIdx = 0;
 
     newConn->portalAddress = portalAddress;

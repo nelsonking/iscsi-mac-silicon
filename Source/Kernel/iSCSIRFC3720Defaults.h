@@ -69,7 +69,7 @@ static const unsigned int kRFC3720_MaxRecvDataSegmentLength = 8192;
 static const unsigned int kRFC3720_MaxRecvDataSegmentLength_Min = 512;
 
 /*! Maximum allowed received data segment length value per RFC3720. */
-static const unsigned int kRFC3720_MaxRecvDataSegmentLength_Max = (2e24-1);
+static const unsigned int kRFC3720_MaxRecvDataSegmentLength_Max = ((1<<24)-1);
 
 /*! Default maximum burst length value per RFC3720. */
 static const unsigned int kRFC3720_MaxBurstLength = 262144;
@@ -78,7 +78,7 @@ static const unsigned int kRFC3720_MaxBurstLength = 262144;
 static const unsigned int kRFC3720_MaxBurstLength_Min = 512;
 
 /*! Maximum maximum burst length value per RFC3720. */
-static const unsigned int kRFC3720_MaxBurstLength_Max = (2e24-1);
+static const unsigned int kRFC3720_MaxBurstLength_Max = ((1<<24)-1);
 
 /*! Default first burst length value per RFC3720. */
 static const unsigned int kRFC3720_FirstBurstLength = 65536;
@@ -87,7 +87,7 @@ static const unsigned int kRFC3720_FirstBurstLength = 65536;
 static const unsigned int kRFC3720_FirstBurstLength_Min = 512;
 
 /*! Maximum first burst length value per RFC3720. */
-static const unsigned int kRFC3720_FirstBurstLength_Max = (2e24-1);
+static const unsigned int kRFC3720_FirstBurstLength_Max = ((1<<24)-1);
 
 /*! Default time to wait value per RFC3720. */
 static const unsigned int kRFC3720_DefaultTime2Wait = 2;

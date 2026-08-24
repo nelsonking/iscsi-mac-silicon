@@ -38,7 +38,7 @@
 #include "iSCSIDA.h"
 #include "iSCSIIORegistry.h"
 #include "iSCSIUtils.h"
-#include "iSCSIAuthRIghts.h"
+#include "iSCSIAuthRights.h"
 
 #include <netdb.h>
 #include <ifaddrs.h>
