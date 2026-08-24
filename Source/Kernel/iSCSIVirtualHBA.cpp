@@ -317,9 +317,13 @@ UInt32 iSCSIVirtualHBA::ReportMaximumTaskCount()
 
 UInt32 iSCSIVirtualHBA::ReportHBASpecificTaskDataSize()
 {
-    // Due to a bug (feature?) in the SCSI family driver, this value cannot
-    // be zero, even if task data is not required.
-	return 1;
+    // Per-task HBAData stores the ConnectionIdentifier (UInt32) so that
+    // HandleTimeout can recover which connection a timed-out task was on.
+    // Must be >= sizeof(ConnectionIdentifier). Previously returned 1, which
+    // left a 1-byte buffer that ProcessParallelTask/HandleTimeout read and
+    // wrote as a UInt32 — a 3-byte overflow that corrupted adjacent SCSI
+    // task fields and left connectionId always read back as 0.
+	return sizeof(ConnectionIdentifier);
 }
 
 UInt32 iSCSIVirtualHBA::ReportHBASpecificDeviceDataSize()
@@ -398,10 +402,32 @@ void iSCSIVirtualHBA::HandleInterruptRequest()
  *  @param task the task that timed out. */
 void iSCSIVirtualHBA::HandleTimeout(SCSIParallelTaskIdentifier task)
 {
+    // HandleTimeout runs in the SCSI stack timer context, NOT the workloop.
+    // Serialize the entire body onto the workloop via the command gate so that
+    // taskQueue operations and connection release (DeactivateConnection /
+    // ReleaseConnection -> IOFree) cannot race with the data path
+    // (BeginTask/ProcessDataIn/ProcessSCSIResponse) that touches the same
+    // connection/taskQueue. Otherwise a connection freed here can be
+    // dereferenced by the workloop -> use-after-free -> corrupted return
+    // address -> kernel panic.
+    GetCommandGate()->runAction((IOCommandGate::Action)HandleTimeoutAction, task);
+}
+
+IOReturn iSCSIVirtualHBA::HandleTimeoutAction(OSObject * owner,
+                                              void * arg0, void * arg1,
+                                              void * arg2, void * arg3)
+{
+    ((iSCSIVirtualHBA*)owner)->HandleTimeoutGated((SCSIParallelTaskIdentifier)arg0);
+    return kIOReturnSuccess;
+}
+
+void iSCSIVirtualHBA::HandleTimeoutGated(SCSIParallelTaskIdentifier task)
+{
     // Determine the target identifier (session identifier) and connection
     // associated with this task and remove the task from the task queue.
     SessionIdentifier sessionId = (UInt16)GetTargetIdentifier(task);
-    ConnectionIdentifier connectionId = *((UInt32*)GetHBADataPointer(task));
+    ConnectionIdentifier connectionId;
+    memcpy(&connectionId, GetHBADataPointer(task), sizeof(connectionId));
     
     if(connectionId >= kMaxConnectionsPerSession)
         return;
@@ -452,8 +478,8 @@ void iSCSIVirtualHBA::HandleConnectionTimeout(SessionIdentifier sessionId,Connec
     DBLog("iscsi: Connection timeout (sid: %d, cid: %d)\n",sessionId,connectionId);
     
     ConnectionIdentifier connectionCount = 0;
-    for(ConnectionIdentifier connectionId = 0; connectionId < kiSCSIMaxConnectionsPerSession; connectionId++)
-        if(session->connections[connectionId])
+    for(ConnectionIdentifier cid = 0; cid < kiSCSIMaxConnectionsPerSession; cid++)
+        if(session->connections[cid])
             connectionCount++;
     
     // In the future add recovery here...
@@ -516,15 +542,20 @@ SCSIServiceResponse iSCSIVirtualHBA::ProcessParallelTask(SCSIParallelTaskIdentif
             connection = conn;
         }
     }
-    
-    connection = session->connections[0];
+
+    // Use the connection selected by the load-balancing loop above (the one
+    // with the lowest estimated time-to-transfer). The previous code
+    // unconditionally overwrote the selection with connections[0], which
+    // defeated load balancing and could pick a disabled connection.
     if(!connection || !connection->dataRecvEventSource)
         return kSCSIServiceResponse_FUNCTION_REJECTED;
     
     // Associate a connection identifier with this task; this is used to
     // maintain the connection associated with a task when only task information
-    // is available (e.g., in the case of a task timeout).
-    *((UInt32*)GetHBADataPointer(parallelTask)) = 0;
+    // is available (e.g., in the case of a task timeout). Use memcpy to avoid
+    // any alignment concerns on the HBAData buffer.
+    ConnectionIdentifier connectionId = connection->cid;
+    memcpy(GetHBADataPointer(parallelTask), &connectionId, sizeof(connectionId));
     
     // Add the amount of data that we need to transfer to this connection
     OSAddAtomic64(GetRequestedDataTransferCount(parallelTask),&connection->dataToTransfer);
@@ -551,6 +582,16 @@ void iSCSIVirtualHBA::BeginTaskOnWorkloopThread(iSCSIVirtualHBA * owner,
                                                 iSCSIConnection * connection,
                                                 UInt32 initiatorTaskTag)
 {
+    // Reject early if any required argument is NULL. BeginTask is dispatched
+    // via a function-pointer action from iSCSITaskQueue::checkForWork, and a
+    // garbage session/connection (e.g. from a use-after-free) would otherwise
+    // be dereferenced below. Mirrors ProcessTaskOnWorkloopThread's guard.
+    if(!owner || !session || !connection) {
+        DBLog("iscsi: BeginTaskOnWorkloopThread bad args (owner=%p session=%p conn=%p)\n",
+              owner, session, connection);
+        return;
+    }
+
     // Task tag corresponding to a connection timeout measurement
     if(owner->ParseInitiatorTaskTagForTaskType(initiatorTaskTag) == kInitiatorTaskTypeLatency)  {
         owner->MeasureConnectionLatency(session,connection);
@@ -754,6 +795,18 @@ void iSCSIVirtualHBA::CompleteParallelTask(iSCSISession * session,
                                            SCSITaskStatus completionStatus,
                                            SCSIServiceResponse serviceResponse)
 {
+    // Reject early if any required argument is invalid; dereferencing a NULL
+    // session/connection/parallelRequest below (e.g. after a use-after-free)
+    // would panic. For a NULL request we still let the superclass complete so
+    // the SCSI stack is informed.
+    if(!session || !connection) {
+        if(parallelRequest)
+            super::CompleteParallelTask(parallelRequest,completionStatus,serviceResponse);
+        return;
+    }
+    if(!parallelRequest)
+        return;
+
     if(GetDataTransferDirection(parallelRequest) == kSCSIDataTransfer_NoDataTransfer) {
         super::CompleteParallelTask(parallelRequest,completionStatus,serviceResponse);
         return;
@@ -1060,9 +1113,20 @@ void iSCSIVirtualHBA::ProcessDataIn(iSCSISession * session,
               session->sessionId,connection->cid);
     else {
         IOMemoryDescriptor  * dataDesc = GetDataBuffer(parallelTask);
-        dataDesc->writeBytes(dataOffset,buffer,length);
-        SetRealizedDataTransferCount(parallelTask,dataOffset+length);
-        connection->dataToTransfer -= length;
+        if(!dataDesc) {
+            DBLog("iscsi: no data buffer for data-in (sid: %d, cid: %d)\n",
+                  session->sessionId,connection->cid);
+        }
+        else if(dataOffset + length > (UInt32)GetRequestedDataTransferCount(parallelTask)) {
+            DBLog("iscsi: data-in out of range (off=%d len=%d xfer=%llu sid: %d, cid: %d)\n",
+                  dataOffset,length,GetRequestedDataTransferCount(parallelTask),
+                  session->sessionId,connection->cid);
+        }
+        else {
+            dataDesc->writeBytes(dataOffset,buffer,length);
+            SetRealizedDataTransferCount(parallelTask,dataOffset+length);
+            connection->dataToTransfer -= length;
+        }
     }
     
     // If the PDU contains a status response, complete this task
@@ -1214,6 +1278,11 @@ void iSCSIVirtualHBA::ProcessDataOutForTask(iSCSISession * session,
 
     // Get descriptor to data to be sent; create buffer for use with each PDU
     IOMemoryDescriptor  * dataDesc   = GetDataBuffer(parallelTask);
+    if(!dataDesc) {
+        DBLog("iscsi: no data buffer for data-out (sid: %d, cid: %d)\n",
+              session->sessionId,connection->cid);
+        return;
+    }
     UInt8 * data = (UInt8*)IOMalloc(connection->maxSendDataSegmentLength);
     
     // The amount of data that needs to be transferred...

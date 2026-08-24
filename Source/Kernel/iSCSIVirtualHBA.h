@@ -325,7 +325,18 @@ public:
                         int flags);
     
 private:
-    
+
+    /*! Runs the body of HandleTimeout on the workloop thread. HandleTimeout
+     *  itself runs in the SCSI stack timer context and dispatches here via
+     *  GetCommandGate()->runAction() so that taskQueue operations and
+     *  connection release cannot race with the data path. */
+    void HandleTimeoutGated(SCSIParallelTaskIdentifier task);
+
+    /*! Command-gate action trampoline that calls HandleTimeoutGated. */
+    static IOReturn HandleTimeoutAction(OSObject * owner,
+                                        void * arg0, void * arg1,
+                                        void * arg2, void * arg3);
+
     /*! Process an incoming task management response PDU.
      *  @param session the session associated with the task mgmt response.
      *  @param connection the connection associated with the task mgmt response.

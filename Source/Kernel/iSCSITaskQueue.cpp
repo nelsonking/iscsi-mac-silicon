@@ -68,7 +68,7 @@ void iSCSITaskQueue::queueTask(UInt32 initiatorTaskTag)
     task->initiatorTaskTag = initiatorTaskTag;
     
     if(!onThread())
-        OSDynamicCast(iSCSIVirtualHBA,owner)->GetCommandGate();
+        IOLog("iscsi: WARNING taskQueue op off workloop\n");
     
     bool firstTaskInQueue = false;
     if(queue_empty(&taskQueue))
@@ -100,7 +100,7 @@ UInt32 iSCSITaskQueue::completeCurrentTask()
     // Remove the completed task (at the head of the queue) and then
     // move onto the next task if one exists
     if(!onThread())
-        OSDynamicCast(iSCSIVirtualHBA,owner)->GetCommandGate();
+        IOLog("iscsi: WARNING taskQueue op off workloop\n");
 
     queue_remove_first(&taskQueue,task,iSCSITask *, queueChain);
 
@@ -137,7 +137,7 @@ bool iSCSITaskQueue::checkForWork()
         UInt32 taskTag;
         
         if(!onThread())
-            OSDynamicCast(iSCSIVirtualHBA,owner)->GetCommandGate();
+            IOLog("iscsi: WARNING taskQueue op off workloop\n");
         
         if(queue_empty(&taskQueue))
             return false;
@@ -152,6 +152,11 @@ bool iSCSITaskQueue::checkForWork()
         // session/connection/taskTag on the stack while the callee reads them
         // from registers -> garbage pointers -> kernel panic. (Same class of bug
         // as iSCSIIOEventSource::checkForWork.)
+        if(!owner || !session || !connection) {
+            IOLog("iscsi: TaskQueue action bad args (owner=%p session=%p conn=%p)\n",
+                  owner, session, connection);
+            return false;
+        }
         ((iSCSITaskQueue::Action)action)((iSCSIVirtualHBA*)owner,session,connection,taskTag);
     }
    
@@ -169,7 +174,7 @@ void iSCSITaskQueue::clearTasksFromQueue()
     iSCSITask * task = NULL;
     
     if(!onThread())
-        OSDynamicCast(iSCSIVirtualHBA,owner)->GetCommandGate();
+        IOLog("iscsi: WARNING taskQueue op off workloop\n");
     
     while(!queue_empty(&taskQueue))
     {
