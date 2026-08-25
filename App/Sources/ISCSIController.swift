@@ -75,10 +75,14 @@ final class ISCSIController: ObservableObject {
             await MainActor.run {
                 self.busy.remove(id)
                 switch result {
-                case .success:
+                case .success(let disk):
                     var rr = self.rt(id)
                     rr.state = .connected
                     rr.since = Date()
+                    // Pin the disk we (likely) saw during the connect-time poll
+                    // so refreshRuntime doesn't treat the connection as "never
+                    // had a disk" if the IOMedia node briefly flickers away.
+                    if let disk { rr.bsdDisk = disk }
                     self.runtime[id] = rr
                     self.refreshRuntime(id, settleDelay: 1.2)
                 case .failure(let msg):
@@ -110,7 +114,7 @@ final class ISCSIController: ObservableObject {
         }
     }
 
-    private enum ConnOutcome { case success; case failure(String) }
+    private enum ConnOutcome { case success(disk: String?); case failure(String) }
 
     /// Mirrors the proven login.sh path: disable discovery, static add, login.
     nonisolated private static func doConnect(_ t: Target) -> ConnOutcome {
@@ -126,12 +130,13 @@ final class ISCSIController: ObservableObject {
         }
         let login = Shell.runPrivileged([iscsictl, "login", t.iqn], timeout: 45)
         // "login" may report success even before the LUN attaches; verify by
-        // waiting briefly for a matching block device to appear.
+        // waiting briefly for a matching block device to appear, and remember
+        // which disk we found so the caller can pin it to this target.
         for _ in 0..<10 {
-            if findDisk(for: t) != nil { return .success }
+            if let disk = findDisk(for: t) { return .success(disk: disk) }
             Thread.sleep(forTimeInterval: 0.6)
         }
-        if login.ok { return .success }          // logged in, disk may still be settling
+        if login.ok { return .success(disk: nil) }  // logged in, disk may still be settling
         return .failure(login.combined.isEmpty ? "iscsictl login failed" : login.combined)
     }
 
@@ -145,7 +150,16 @@ final class ISCSIController: ObservableObject {
         guard let t = targets.first(where: { $0.id == id }) else { return }
         Task.detached(priority: .utility) {
             if settleDelay > 0 { Thread.sleep(forTimeInterval: settleDelay) }
-            let info = Self.probe(t)
+            // The iSCSI LUN's IOMedia node can take a moment to stabilise in the
+            // IORegistry after login, even after the connect-time poll already
+            // saw it once. Poll a few times so a transient nil probe (e.g. the
+            // APFS container still being synthesised) doesn't make us throw away
+            // a valid connection below.
+            var info = Self.probe(t)
+            for _ in 0..<5 where info == nil {
+                Thread.sleep(forTimeInterval: 0.6)
+                info = Self.probe(t)
+            }
             await MainActor.run {
                 var rr = self.rt(id)
                 // Preserve a fresh "connecting"/"failed" state set by an in-flight op.
@@ -160,8 +174,15 @@ final class ISCSIController: ObservableObject {
                     rr.state = info.mount != nil ? .mounted : .connected
                     if rr.since == nil { rr.since = Date() }
                 } else if rr.isConnected {
-                    // was connected but no disk now -> dropped
-                    rr = TargetRuntime()
+                    // Never had a disk recorded (still settling) -> keep the
+                    // connected state and wait for the next refresh rather than
+                    // clobbering it to offline. Only drop when we previously held
+                    // a disk and it has genuinely disappeared.
+                    if rr.bsdDisk == nil {
+                        // preserve state + since, leave fields as-is
+                    } else {
+                        rr = TargetRuntime()
+                    }
                 }
                 self.runtime[id] = rr
             }
