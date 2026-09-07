@@ -118,7 +118,7 @@ struct DetailView: View {
                 }
                 VStack(alignment: .trailing, spacing: 4) {
                     HStack(alignment: .firstTextBaseline, spacing: 3) {
-                        Text(String(format: "%.0f", monitor.mbPerSec))
+                        Text(String(format: "%.2f", monitor.mbPerSec))
                             .font(.system(size: 17, weight: .bold)).monospacedDigit()
                         Text("MB/s").font(.system(size: 11)).foregroundStyle(.secondary)
                     }

@@ -108,6 +108,12 @@ enum IOKitDiskFinder {
     /// identifier, so we take the first stats-looking entry; multi-target
     /// matching by IQN can be added later if needed.
     static func readWriteCounts(for iqn: String) -> (readBytes: Int64, writtenBytes: Int64)? {
+        // 精确匹配：先拿该 target 的 SCSI Target Identifier，用它算出 Device
+        // Stats 的 key（1-based 十六进制）。不能遍历取第一个 entry——Device
+        // Stats 会残留历史 target 的 entry，且 NSDictionary 无序，遍历取首个
+        // 会偶发取错 entry，让计数在多个 target 间跳变、速率被放大成异常大数。
+        guard let targetId = scsiTargetIdentifier(for: iqn) else { return nil }
+
         let svc = IOServiceGetMatchingService(kIOMainPortDefault,
                                               IOServiceMatching("AppleSCSISubsystemGlobals"))
         guard svc != 0 else { return nil }
@@ -117,13 +123,39 @@ enum IOKitDiskFinder {
                                                         kCFAllocatorDefault, 0)?.takeRetainedValue(),
               let stats = raw as? [String: Any] else { return nil }
 
+        let key = String(format: "%016llx", targetId + 1)
+        guard let d = stats[key] as? [String: Any],
+              let readBlocks  = (d["ReadBlockCount"]  as? NSNumber)?.uint64Value,
+              let writeBlocks = (d["WriteBlockCount"] as? NSNumber)?.uint64Value else { return nil }
+
         let blockSize: UInt64 = 512
-        for (_, value) in stats {
-            guard let d = value as? [String: Any] else { continue }
-            let readBlocks  = (d["ReadBlockCount"]  as? NSNumber)?.uint64Value ?? 0
-            let writeBlocks = (d["WriteBlockCount"] as? NSNumber)?.uint64Value ?? 0
-            return (readBytes: Int64(readBlocks  * blockSize),
-                    writtenBytes: Int64(writeBlocks * blockSize))
+        return (readBytes: Int64(readBlocks  * blockSize),
+                writtenBytes: Int64(writeBlocks * blockSize))
+    }
+
+    /// Returns the SCSI Target Identifier for the target matching `iqn`, read
+    /// from its "Protocol Characteristics" dictionary.
+    private static func scsiTargetIdentifier(for iqn: String) -> UInt64? {
+        let hba = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching(hbaClassName))
+        guard hba != 0 else { return nil }
+        defer { IOObjectRelease(hba) }
+
+        var iter: io_iterator_t = 0
+        guard IORegistryEntryGetChildIterator(hba, kIOServicePlane, &iter) == KERN_SUCCESS else { return nil }
+        defer { IOObjectRelease(iter) }
+
+        var entry = IOIteratorNext(iter)
+        while entry != 0 {
+            if let raw = IORegistryEntryCreateCFProperty(entry, protocolCharacteristicsKey as CFString,
+                                                         kCFAllocatorDefault, 0)?.takeRetainedValue(),
+               let p = raw as? [String: Any],
+               let eIQN = p[iSCSIQualifiedNameKey] as? String, eIQN == iqn {
+                let tid = (p["SCSI Target Identifier"] as? NSNumber)?.uint64Value
+                IOObjectRelease(entry)
+                return tid
+            }
+            IOObjectRelease(entry)
+            entry = IOIteratorNext(iter)
         }
         return nil
     }

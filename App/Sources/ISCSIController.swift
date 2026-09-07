@@ -13,10 +13,64 @@ final class ISCSIController: ObservableObject {
 
     nonisolated static let iscsictl = "/usr/local/bin/iscsictl"
 
+    private var refreshTimer: Timer?
+    private var rateTimer: Timer?
+    private var refreshUsers = 0
+    @Published var rates: [UUID: Double] = [:]
+
     init() {
         targets = TargetStorage.load()
         selection = targets.first?.id
         scheduleAutoConnect()
+    }
+
+    /// Starts the periodic re-probe timer. Runs only while the management
+    /// window is on screen (started from the window's onAppear); stopped from
+    /// its onDisappear so no timer spins when the app is backgrounded.
+    func startPeriodicRefresh() {
+        refreshUsers += 1
+        guard refreshUsers == 1 else { return }
+        let t = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, !self.targets.isEmpty else { return }
+                self.refreshAll()
+            }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        refreshTimer = t
+
+        // Real-time throughput via iostat (same source as the detail view),
+        // on its own cadence so the ~1s iostat run doesn't back up.
+        let rt = Timer(timeInterval: 1.4, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, !self.targets.isEmpty else { return }
+                self.sampleRates()
+            }
+        }
+        RunLoop.main.add(rt, forMode: .common)
+        rateTimer = rt
+    }
+
+    func stopPeriodicRefresh() {
+        guard refreshUsers > 0 else { return }
+        refreshUsers -= 1
+        guard refreshUsers == 0 else { return }
+        refreshTimer?.invalidate(); refreshTimer = nil
+        rateTimer?.invalidate(); rateTimer = nil
+    }
+
+    /// Samples each mounted target's throughput via iostat and stores MB/s in
+    /// `rates`. Runs off the main thread (iostat blocks ~1s); results are
+    /// published back on the main actor.
+    private func sampleRates() {
+        for t in targets {
+            guard rt(t.id).isMounted, let disk = rt(t.id).bsdDisk else { continue }
+            Task.detached(priority: .utility) {
+                let r = Shell.run("/usr/sbin/iostat", ["-d", "-w", "1", "-c", "2", disk], timeout: 6)
+                let mb = DiskMonitor.parseMBs(r.out)
+                await MainActor.run { self.rates[t.id] = mb }
+            }
+        }
     }
 
     /// On launch, connect any targets flagged "connect at login". Deferred so the
@@ -172,8 +226,12 @@ final class ISCSIController: ObservableObject {
                     rr.fsType = info.fs
                     rr.totalBytes = info.total
                     rr.usedBytes = info.used
-                    rr.totalReadBytes = info.readBytes
-                    rr.totalWrittenBytes = info.writtenBytes
+                    // readWriteCounts 失败时 probe 返回 -1；此时跳过累计更新，
+                    // 保持上次的累计值（累计用于详情页展示，实时速率另走 iostat）。
+                    if info.readBytes >= 0 && info.writtenBytes >= 0 {
+                        rr.totalReadBytes = info.readBytes
+                        rr.totalWrittenBytes = info.writtenBytes
+                    }
                     rr.state = info.mount != nil ? .mounted : .connected
                     if rr.since == nil { rr.since = Date() }
                 } else if rr.isConnected {
@@ -215,7 +273,7 @@ final class ISCSIController: ObservableObject {
         let rw = IOKitDiskFinder.readWriteCounts(for: t.iqn)
         return Probe(disk: disk, mount: mountInfo?.mount, volume: mountInfo?.volume,
                      fs: mountInfo?.fs, total: mountInfo?.total ?? 0, used: mountInfo?.used ?? 0,
-                     readBytes: rw?.readBytes ?? 0, writtenBytes: rw?.writtenBytes ?? 0)
+                     readBytes: rw?.readBytes ?? -1, writtenBytes: rw?.writtenBytes ?? -1)
     }
 
     /// Find the iSCSI-backed disk for a target by matching its IQN against the

@@ -29,15 +29,13 @@ struct MenuBarContent: View {
 
             Divider()
             VStack(spacing: 2) {
-                menuButton("plus.circle", L("menu.addTarget")) {
-                    openManager(); NotificationCenter.default.post(name: .requestAddTarget, object: nil)
-                }
                 menuButton("macwindow", L("menu.openManager"), shortcut: "⌘,") { openManager() }
                 menuButton("power", L("common.quit"), tint: .secondary) { NSApplication.shared.terminate(nil) }
             }
             .padding(6)
         }
-        .onAppear { status.refresh(); controller.refreshAll() }
+        .onAppear { status.refresh(); controller.refreshAll(); controller.startPeriodicRefresh() }
+        .onDisappear { controller.stopPeriodicRefresh() }
     }
 
     private var header: some View {
@@ -84,10 +82,10 @@ struct MenuBarContent: View {
                 Spacer()
                 if controller.isBusy(t.id) {
                     ProgressView().controlSize(.small)
-                } else if rt.isConnected {
-                    Button(L("common.disconnect")) { controller.disconnect(t.id) }
-                        .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(.blue)
-                } else {
+                } else if rt.isMounted {
+                    Text(String(format: "%.2f MB/s", controller.rates[t.id] ?? 0))
+                        .font(.system(size: 11, weight: .medium)).monospacedDigit().foregroundStyle(.secondary)
+                } else if !rt.isConnected {
                     Button(L("common.connect")) { controller.connect(t.id) }
                         .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(.blue)
                         .disabled(status.needsSetup)

@@ -21,7 +21,8 @@ struct iSCSIApp: App {
         Window(L("app.name"), id: "manager") {
             MainWindow(controller: controller, status: status)
                 .frame(minWidth: 720, minHeight: 460)
-                .onAppear { status.refresh(); controller.refreshAll() }
+                .onAppear { status.refresh(); controller.refreshAll(); controller.startPeriodicRefresh() }
+                .onDisappear { controller.stopPeriodicRefresh() }
         }
         .windowResizability(.contentMinSize)
         .defaultSize(width: 820, height: 520)
