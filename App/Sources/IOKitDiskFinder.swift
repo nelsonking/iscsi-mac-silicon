@@ -99,4 +99,32 @@ enum IOKitDiskFinder {
         }
         return nil
     }
+
+    /// Reads cumulative read/write byte counts from the SCSI layer's
+    /// `Device Stats` (held by `AppleSCSISubsystemGlobals`). The counters are
+    /// block counts, multiplied by the logical block size (512 for this
+    /// initiator's targets). Returns nil if the stats node is unavailable.
+    /// Single-target deployments have exactly one entry keyed by the SCSI target
+    /// identifier, so we take the first stats-looking entry; multi-target
+    /// matching by IQN can be added later if needed.
+    static func readWriteCounts(for iqn: String) -> (readBytes: Int64, writtenBytes: Int64)? {
+        let svc = IOServiceGetMatchingService(kIOMainPortDefault,
+                                              IOServiceMatching("AppleSCSISubsystemGlobals"))
+        guard svc != 0 else { return nil }
+        defer { IOObjectRelease(svc) }
+
+        guard let raw = IORegistryEntryCreateCFProperty(svc, "Device Stats" as CFString,
+                                                        kCFAllocatorDefault, 0)?.takeRetainedValue(),
+              let stats = raw as? [String: Any] else { return nil }
+
+        let blockSize: UInt64 = 512
+        for (_, value) in stats {
+            guard let d = value as? [String: Any] else { continue }
+            let readBlocks  = (d["ReadBlockCount"]  as? NSNumber)?.uint64Value ?? 0
+            let writeBlocks = (d["WriteBlockCount"] as? NSNumber)?.uint64Value ?? 0
+            return (readBytes: Int64(readBlocks  * blockSize),
+                    writtenBytes: Int64(writeBlocks * blockSize))
+        }
+        return nil
+    }
 }

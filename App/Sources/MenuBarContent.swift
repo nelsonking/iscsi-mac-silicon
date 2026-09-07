@@ -108,8 +108,8 @@ struct MenuBarContent: View {
             return "\(L("status.mounted")) · \(humanBytes(rt.totalBytes))"
         } else if rt.isConnected {
             return L("status.connected")
-        } else if case .failed = rt.state {
-            return L("status.error")
+        } else if case .failed(let msg) = rt.state {
+            return msg.isEmpty ? L("status.error") : String(msg.prefix(60))
         }
         return "\(L("status.disconnected")) · \(t.portalHost)"
     }

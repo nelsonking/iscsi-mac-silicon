@@ -27,6 +27,8 @@ struct TargetRuntime: Equatable {
     var fsType: String? = nil
     var totalBytes: Int64 = 0
     var usedBytes: Int64 = 0
+    var totalReadBytes: Int64 = 0
+    var totalWrittenBytes: Int64 = 0
     var since: Date? = nil
 
     var isConnected: Bool {

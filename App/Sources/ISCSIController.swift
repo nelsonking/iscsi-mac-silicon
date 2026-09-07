@@ -128,6 +128,11 @@ final class ISCSIController: ObservableObject {
                                      "-CHAPName", t.chapUser,
                                      "-CHAPSecret", t.chapSecret], timeout: 15)
         }
+        // Let the daemon handle reconnect: "persistent" re-logs in after a
+        // dropped link (network restored), "auto-login" re-logs in on daemon
+        // start. The App's own launch-time connect becomes a backstop.
+        _ = Shell.runPrivileged([iscsictl, "modify", "target-config", t.ctlTarget,
+                                 "-auto-login", "enable", "-persistent", "enable"], timeout: 15)
         let login = Shell.runPrivileged([iscsictl, "login", t.iqn], timeout: 45)
         // "login" may report success even before the LUN attaches; verify by
         // waiting briefly for a matching block device to appear, and remember
@@ -155,11 +160,7 @@ final class ISCSIController: ObservableObject {
             // saw it once. Poll a few times so a transient nil probe (e.g. the
             // APFS container still being synthesised) doesn't make us throw away
             // a valid connection below.
-            var info = Self.probe(t)
-            for _ in 0..<5 where info == nil {
-                Thread.sleep(forTimeInterval: 0.6)
-                info = Self.probe(t)
-            }
+            let info = Self.probeWithRetry(t)
             await MainActor.run {
                 var rr = self.rt(id)
                 // Preserve a fresh "connecting"/"failed" state set by an in-flight op.
@@ -171,6 +172,8 @@ final class ISCSIController: ObservableObject {
                     rr.fsType = info.fs
                     rr.totalBytes = info.total
                     rr.usedBytes = info.used
+                    rr.totalReadBytes = info.readBytes
+                    rr.totalWrittenBytes = info.writtenBytes
                     rr.state = info.mount != nil ? .mounted : .connected
                     if rr.since == nil { rr.since = Date() }
                 } else if rr.isConnected {
@@ -188,15 +191,31 @@ final class ISCSIController: ObservableObject {
         }
     }
 
-    struct Probe { let disk: String; let mount: String?; let volume: String?; let fs: String?; let total: Int64; let used: Int64 }
+    /// Polls probe() a few times so a transient nil (IOMedia still settling)
+    /// doesn't get treated as "no disk". Kept as a separate function so the
+    /// caller binds the result to a `let` (avoids a captured-var concurrency
+    /// warning inside Task.detached).
+    nonisolated private static func probeWithRetry(_ t: Target) -> Probe? {
+        if let info = probe(t) { return info }
+        for _ in 0..<5 {
+            Thread.sleep(forTimeInterval: 0.6)
+            if let info = probe(t) { return info }
+        }
+        return nil
+    }
 
-    /// Find the iSCSI-backed disk for a target and read its mount/capacity.
+    struct Probe { let disk: String; let mount: String?; let volume: String?; let fs: String?; let total: Int64; let used: Int64; let readBytes: Int64; let writtenBytes: Int64 }
+
+    /// Find the iSCSI-backed disk for a target and read its mount/capacity and
+    /// cumulative read/write byte counts.
     nonisolated private static func probe(_ t: Target) -> Probe? {
         guard let disk = findDisk(for: t) else { return nil }
         // Look at the whole disk + any APFS/HFS volume on it.
         let mountInfo = mountInfo(forDisk: disk)
+        let rw = IOKitDiskFinder.readWriteCounts(for: t.iqn)
         return Probe(disk: disk, mount: mountInfo?.mount, volume: mountInfo?.volume,
-                     fs: mountInfo?.fs, total: mountInfo?.total ?? 0, used: mountInfo?.used ?? 0)
+                     fs: mountInfo?.fs, total: mountInfo?.total ?? 0, used: mountInfo?.used ?? 0,
+                     readBytes: rw?.readBytes ?? 0, writtenBytes: rw?.writtenBytes ?? 0)
     }
 
     /// Find the iSCSI-backed disk for a target by matching its IQN against the

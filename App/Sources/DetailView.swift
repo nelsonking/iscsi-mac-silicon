@@ -111,6 +111,8 @@ struct DetailView: View {
                         .font(.system(size: 13, weight: .semibold)).lineLimit(1)
                     Text("\(humanBytes(rt.usedBytes)) / \(humanBytes(rt.totalBytes)) · \(L("detail.mountedAt")) \(rt.mountPoint ?? "")")
                         .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                    Text(L("detail.readWrite", humanBytes(rt.totalReadBytes), humanBytes(rt.totalWrittenBytes)))
+                        .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
                     ProgressView(value: Double(rt.usedBytes), total: Double(max(rt.totalBytes, 1)))
                         .progressViewStyle(.linear).tint(.accentColor).frame(height: 6).padding(.top, 3)
                 }

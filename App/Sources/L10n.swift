@@ -60,6 +60,7 @@ enum L10n {
         "detail.off":          ("已关闭", "Off"),
         "detail.disk":         ("磁盘 · 实时吞吐", "Disk · Live throughput"),
         "detail.mountedAt":    ("挂载于", "Mounted at"),
+        "detail.readWrite":    ("读 %@ · 写 %@", "Read %@ · Written %@"),
         "detail.notMounted":   ("已连接，磁盘未挂载", "Connected, not mounted"),
         "detail.empty.title":  ("选择一个 Target", "Select a target"),
         "detail.empty.sub":    ("从左侧选择，或添加一个新的 iSCSI 目标。", "Pick one on the left, or add a new iSCSI target."),

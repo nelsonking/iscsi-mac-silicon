@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ioreg -l -w 0)",
+      "Bash(ioreg -c SCSISubsystemGlobals)",
+      "Bash(ioreg -n SCSISubsystemGlobals)"
+    ],
+    "additionalDirectories": [
+      "/tmp"
+    ]
+  }
+}
