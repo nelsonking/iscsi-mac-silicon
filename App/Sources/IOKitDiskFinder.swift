@@ -20,7 +20,7 @@ enum IOKitDiskFinder {
     /// Property keys (see iSCSIIORegistry.h and IOStorage headers).
     private static let protocolCharacteristicsKey = "Protocol Characteristics"
     private static let iSCSIQualifiedNameKey     = "iSCSI Qualified Name"
-    private static let bsdNameKey                = "BSD name"
+    private static let bsdNameKey                = "BSD Name"
     private static let blockStorageDriverClass   = "IOBlockStorageDriver"
 
     /// Returns the BSD device identifier (e.g. "disk4") for the whole-disk

@@ -174,13 +174,12 @@ final class ISCSIController: ObservableObject {
                     rr.state = info.mount != nil ? .mounted : .connected
                     if rr.since == nil { rr.since = Date() }
                 } else if rr.isConnected {
-                    // Never had a disk recorded (still settling) -> keep the
-                    // connected state and wait for the next refresh rather than
-                    // clobbering it to offline. Only drop when we previously held
-                    // a disk and it has genuinely disappeared.
-                    if rr.bsdDisk == nil {
-                        // preserve state + since, leave fields as-is
-                    } else {
+                    // Only drop to offline if we had previously reached "mounted"
+                    // (a successful probe saw both disk and mount) and the disk
+                    // has since genuinely disappeared. If we're still just
+                    // "connected" (probe hasn't succeeded yet), keep the state so
+                    // a late-attaching LUN isn't marked as dropped.
+                    if rr.isMounted {
                         rr = TargetRuntime()
                     }
                 }
