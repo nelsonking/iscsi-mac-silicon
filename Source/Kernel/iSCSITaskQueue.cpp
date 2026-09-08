@@ -49,6 +49,10 @@ bool iSCSITaskQueue::init(iSCSIVirtualHBA * owner,
     iSCSITaskQueue::session = session;
     iSCSITaskQueue::connection = connection;
 
+    queueLock = IOLockAlloc();
+    if(!queueLock)
+        return false;
+
     // Initialize task queue to store parallel SCSI tasks for processing
     queue_init(&taskQueue);
 
@@ -67,7 +71,9 @@ void iSCSITaskQueue::queueTask(UInt32 initiatorTaskTag)
     if(!onThread())
         IOLog("iscsi: WARNING taskQueue op off workloop\n");
 
+    IOLockLock(queueLock);
     queue_enter(&taskQueue,task,iSCSITask *,queueChain);
+    IOLockUnlock(queueLock);
 
     // Always signal so checkForWork drains the queue promptly (pipelining).
     newTask = true;
@@ -103,27 +109,34 @@ bool iSCSITaskQueue::checkForWork()
         if(!onThread())
             IOLog("iscsi: WARNING taskQueue op off workloop\n");
 
-        // Drain the entire queue: dispatch every queued task (each sends its
-        // SCSI command) and dequeue it. This pipelines multiple commands so
-        // the connection is no longer RTT-bound by a single outstanding task.
-        // ('action' is cast back to the concrete Action type for the
-        // register-based calling convention; see the original note about
-        // Apple arm64 variadic-call panics.)
-        while(!queue_empty(&taskQueue)) {
-            iSCSITask * task = (iSCSITask *)queue_first(&taskQueue);
-            UInt32 taskTag = task->initiatorTaskTag;
+        // Dequeue tasks one at a time under the lock — queueTask runs on the
+        // SCSI stack thread and can enqueue concurrently — then dispatch
+        // outside the lock so socket I/O doesn't hold it. This pipelines
+        // multiple commands so the connection is no longer RTT-bound by a
+        // single outstanding task. ('action' is cast back to the concrete
+        // Action type for the register-based calling convention; see the
+        // original note about Apple arm64 variadic-call panics.)
+        while(true) {
+            iSCSITask * task = NULL;
+            UInt32 taskTag = 0;
+
+            IOLockLock(queueLock);
+            if(queue_empty(&taskQueue)) {
+                IOLockUnlock(queueLock);
+                break;
+            }
+            task = (iSCSITask *)queue_first(&taskQueue);
+            taskTag = task->initiatorTaskTag;
+            queue_remove_first(&taskQueue, task, iSCSITask *, queueChain);
+            IOLockUnlock(queueLock);
 
             if(!owner || !session || !connection) {
                 IOLog("iscsi: TaskQueue action bad args (owner=%p session=%p conn=%p)\n",
                       owner, session, connection);
+                IOFree(task, sizeof(iSCSITask));
                 break;
             }
             ((iSCSITaskQueue::Action)action)((iSCSIVirtualHBA*)owner,session,connection,taskTag);
-
-            // Dequeue now that the command is dispatched; completion is
-            // tracked by the SCSI subsystem (FindTaskForControllerIdentifier),
-            // not by this queue.
-            queue_remove_first(&taskQueue, task, iSCSITask *, queueChain);
             IOFree(task, sizeof(iSCSITask));
         }
     }
@@ -143,10 +156,12 @@ void iSCSITaskQueue::clearTasksFromQueue()
     if(!onThread())
         IOLog("iscsi: WARNING taskQueue op off workloop\n");
 
+    IOLockLock(queueLock);
     while(!queue_empty(&taskQueue))
     {
         queue_remove_first(&taskQueue,task,iSCSITask *, queueChain);
         if(task)
             IOFree(task,sizeof(iSCSITask));
     }
+    IOLockUnlock(queueLock);
 }

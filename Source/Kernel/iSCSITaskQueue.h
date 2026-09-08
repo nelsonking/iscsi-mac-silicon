@@ -32,6 +32,7 @@
 #include <IOKit/IOService.h>
 #include <IOKit/IOEventSource.h>
 #include <kern/queue.h>
+#include <IOKit/IOLocks.h>
 
 #include "iSCSIKernelClasses.h"
 #include "iSCSITypesKernel.h"
@@ -102,7 +103,11 @@ private:
     queue_head_t taskQueue;
     
     bool newTask;
-    
+
+    /*! Lock protecting the task queue against concurrent queueTask (SCSI
+     *  stack thread) and checkForWork/clearTasksFromQueue (workloop) access. */
+    IOLock * queueLock;
+
 };
 
 #endif
