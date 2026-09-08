@@ -531,6 +531,31 @@ void iSCSIVirtualHBA::HandleConnectionTimeout(SessionIdentifier sessionId,Connec
 
 SCSIServiceResponse iSCSIVirtualHBA::ProcessParallelTask(SCSIParallelTaskIdentifier parallelTask)
 {
+    // ProcessParallelTask runs on the SCSI stack thread, NOT the workloop. The
+    // body below touches the base class's task list (SetControllerTaskIdentifier)
+    // and the taskQueue, which the data path (ProcessDataIn/CompleteParallelTask)
+    // also touches on the workloop. Serialize the whole body onto the workloop
+    // via the command gate so those accesses can't race (the "corrupt list"
+    // panic). runAction runs the action inline if already on the workloop
+    // (re-entrant completion path), so no deadlock.
+    SCSIServiceResponse result = kSCSIServiceResponse_SERVICE_DELIVERY_OR_TARGET_FAILURE;
+    GetCommandGate()->runAction((IOCommandGate::Action)ProcessParallelTaskAction,
+                                parallelTask, &result);
+    return result;
+}
+
+IOReturn iSCSIVirtualHBA::ProcessParallelTaskAction(OSObject * owner,
+                                                    void * arg0, void * arg1,
+                                                    void * arg2, void * arg3)
+{
+    iSCSIVirtualHBA * hba = (iSCSIVirtualHBA *)owner;
+    SCSIServiceResponse * result = (SCSIServiceResponse *)arg1;
+    *result = hba->ProcessParallelTaskGated((SCSIParallelTaskIdentifier)arg0);
+    return kIOReturnSuccess;
+}
+
+SCSIServiceResponse iSCSIVirtualHBA::ProcessParallelTaskGated(SCSIParallelTaskIdentifier parallelTask)
+{
     // Here we set an (iSCSI) initiator task tag for the SCSI task and queue
     // the iSCSI task for later processing
     SCSITargetIdentifier targetId   = GetTargetIdentifier(parallelTask);

@@ -65,29 +65,21 @@ bool iSCSITaskQueue::init(iSCSIVirtualHBA * owner,
  *  @param initiatorTaskTag the iSCSI task tag associated with the task. */
 void iSCSITaskQueue::queueTask(UInt32 initiatorTaskTag)
 {
-    // Signal the workloop thread that work is available only if this is
-    // the only task in the queue (otherwise the task preceding this is
-    // being processed; we'll get to this once that's done).
     iSCSITask * task = (iSCSITask*)IOMalloc(sizeof(iSCSITask));
     task->initiatorTaskTag = initiatorTaskTag;
 
     if(!onThread())
         IOLog("iscsi: WARNING taskQueue op off workloop\n");
 
-    bool firstTaskInQueue = false;
     IOLockLock(queueLock);
-    if(queue_empty(&taskQueue))
-        firstTaskInQueue = true;
     queue_enter(&taskQueue,task,iSCSITask *,queueChain);
     IOLockUnlock(queueLock);
 
-    // Signal the workloop to process a new task...
-    if(firstTaskInQueue) {
-        newTask = true;
+    // Always signal so checkForWork drains the queue promptly (pipelining).
+    newTask = true;
 
-        if(getWorkLoop())
-            signalWorkAvailable();
-    }
+    if(getWorkLoop())
+        signalWorkAvailable();
 }
 
 /*! Removes a task from the queue (either the task has been successfully
@@ -95,35 +87,11 @@ void iSCSITaskQueue::queueTask(UInt32 initiatorTaskTag)
  *  @return the iSCSI task tag for the task that was just completed. */
 UInt32 iSCSITaskQueue::completeCurrentTask()
 {
-    UInt32 taskTag = 0;
-    iSCSITask * task = NULL;
-
-    if(!onThread())
-        IOLog("iscsi: WARNING taskQueue op off workloop\n");
-
-    // Remove the completed task (at the head of the queue) and check whether
-    // more tasks remain — both under the lock so queueTask (on the SCSI stack
-    // thread) can't interleave and corrupt the list.
-    bool hasMore = false;
-    IOLockLock(queueLock);
-    if(!queue_empty(&taskQueue)) {
-        queue_remove_first(&taskQueue,task,iSCSITask *, queueChain);
-        if(task)
-            taskTag = task->initiatorTaskTag;
-        hasMore = !queue_empty(&taskQueue);
-    }
-    IOLockUnlock(queueLock);
-
-    if(task)
-        IOFree(task,sizeof(iSCSITask));
-
-    // If there are still tasks to process let the HBA know...
-    if(hasMore) {
-        newTask = true;
-        if(getWorkLoop())
-            signalWorkAvailable();
-    }
-    return taskTag;
+    // With pipelining, tasks are dequeued at dispatch time (see checkForWork),
+    // so completion needs no queue bookkeeping. Completion is tracked by the
+    // SCSI subsystem (FindTaskForControllerIdentifier). Kept as a no-op to
+    // preserve the call sites.
+    return 0;
 }
 
 
@@ -138,37 +106,38 @@ bool iSCSITaskQueue::checkForWork()
     newTask = false;
 
     if(action && owner) {
-        UInt32 taskTag;
-        iSCSITask * task = NULL;
-
         if(!onThread())
             IOLog("iscsi: WARNING taskQueue op off workloop\n");
 
-        // Peek the head task under the lock, then dispatch it OUTSIDE the lock
-        // (so socket I/O in the action doesn't hold the queue lock). The task
-        // stays in the queue and is removed later by completeCurrentTask.
-        IOLockLock(queueLock);
-        if(queue_empty(&taskQueue)) {
-            IOLockUnlock(queueLock);
-            return false;
-        }
-        task = (iSCSITask *)queue_first(&taskQueue);
-        taskTag = task->initiatorTaskTag;
-        IOLockUnlock(queueLock);
+        // Dequeue tasks one at a time under the lock, then dispatch OUTSIDE
+        // the lock (so socket I/O doesn't hold it). This pipelines multiple
+        // commands so the connection is no longer RTT-bound by a single
+        // outstanding task. ('action' is cast back to the concrete Action type
+        // for the register-based calling convention; see the original note
+        // about Apple arm64 variadic-call panics.)
+        while(true) {
+            iSCSITask * task = NULL;
+            UInt32 taskTag = 0;
 
-        // 'action' is stored in the base class as the variadic
-        // IOEventSource::Action; cast it back to our concrete Action type so the
-        // call uses the register-based (non-variadic) calling convention. On
-        // Apple arm64, calling through the variadic type passes
-        // session/connection/taskTag on the stack while the callee reads them
-        // from registers -> garbage pointers -> kernel panic. (Same class of bug
-        // as iSCSIIOEventSource::checkForWork.)
-        if(!owner || !session || !connection) {
-            IOLog("iscsi: TaskQueue action bad args (owner=%p session=%p conn=%p)\n",
-                  owner, session, connection);
-            return false;
+            IOLockLock(queueLock);
+            if(queue_empty(&taskQueue)) {
+                IOLockUnlock(queueLock);
+                break;
+            }
+            task = (iSCSITask *)queue_first(&taskQueue);
+            taskTag = task->initiatorTaskTag;
+            queue_remove_first(&taskQueue, task, iSCSITask *, queueChain);
+            IOLockUnlock(queueLock);
+
+            if(!owner || !session || !connection) {
+                IOLog("iscsi: TaskQueue action bad args (owner=%p session=%p conn=%p)\n",
+                      owner, session, connection);
+                IOFree(task, sizeof(iSCSITask));
+                break;
+            }
+            ((iSCSITaskQueue::Action)action)((iSCSIVirtualHBA*)owner,session,connection,taskTag);
+            IOFree(task, sizeof(iSCSITask));
         }
-        ((iSCSITaskQueue::Action)action)((iSCSIVirtualHBA*)owner,session,connection,taskTag);
     }
 
     return false;

@@ -344,6 +344,18 @@ private:
                                         void * arg0, void * arg1,
                                         void * arg2, void * arg3);
 
+    /*! Runs the body of ProcessParallelTask on the workloop thread.
+     *  ProcessParallelTask itself runs on the SCSI stack thread and dispatches
+     *  here via GetCommandGate()->runAction() so that the base class's task
+     *  list (SetControllerTaskIdentifier) and the taskQueue cannot race with
+     *  the data path. */
+    SCSIServiceResponse ProcessParallelTaskGated(SCSIParallelTaskIdentifier parallelTask);
+
+    /*! Command-gate action trampoline that calls ProcessParallelTaskGated. */
+    static IOReturn ProcessParallelTaskAction(OSObject * owner,
+                                              void * arg0, void * arg1,
+                                              void * arg2, void * arg3);
+
     /*! Process an incoming task management response PDU.
      *  @param session the session associated with the task mgmt response.
      *  @param connection the connection associated with the task mgmt response.
