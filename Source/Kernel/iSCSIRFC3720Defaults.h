@@ -39,7 +39,7 @@ static const unsigned int kRFC3720_MaxConnections_Min = 1;
 static const unsigned int kRFC3720_MaxConnections_Max = 65535;
 
 /*! Default initialR2T connections value per RFC3720. */
-static const bool kRFC3720_InitialR2T = true;
+static const bool kRFC3720_InitialR2T = false;
 
 /*! Default immediate data value per RFC3720. */
 static const bool kRFC3720_ImmediateData = true;
@@ -63,7 +63,7 @@ static const unsigned int kRFC3720_IFMarkInt = 8192;
 static const unsigned int kRFC3720_OFMarkInt = 8192;
 
 /*! Default maximum received data segment length value per RFC3720. */
-static const unsigned int kRFC3720_MaxRecvDataSegmentLength = 8192;
+static const unsigned int kRFC3720_MaxRecvDataSegmentLength = 262144;
 
 /*! Minimum allowed received data segment length value per RFC3720. */
 static const unsigned int kRFC3720_MaxRecvDataSegmentLength_Min = 512;
@@ -72,7 +72,7 @@ static const unsigned int kRFC3720_MaxRecvDataSegmentLength_Min = 512;
 static const unsigned int kRFC3720_MaxRecvDataSegmentLength_Max = ((1<<24)-1);
 
 /*! Default maximum burst length value per RFC3720. */
-static const unsigned int kRFC3720_MaxBurstLength = 262144;
+static const unsigned int kRFC3720_MaxBurstLength = 1048576;
 
 /*! Minimum maximum burst length value per RFC3720. */
 static const unsigned int kRFC3720_MaxBurstLength_Min = 512;
@@ -81,7 +81,7 @@ static const unsigned int kRFC3720_MaxBurstLength_Min = 512;
 static const unsigned int kRFC3720_MaxBurstLength_Max = ((1<<24)-1);
 
 /*! Default first burst length value per RFC3720. */
-static const unsigned int kRFC3720_FirstBurstLength = 65536;
+static const unsigned int kRFC3720_FirstBurstLength = 262144;
 
 /*! Minimum first burst length value per RFC3720. */
 static const unsigned int kRFC3720_FirstBurstLength_Min = 512;
@@ -108,7 +108,7 @@ static const unsigned int kRFC3720_DefaultTime2Retain_Min = 0;
 static const unsigned int kRFC3720_DefaultTime2Retain_Max = 3600;
 
 /*! Default maximum outstanding R2T value per RFC3720. */
-static const unsigned int kRFC3720_MaxOutstandingR2T = 1;
+static const unsigned int kRFC3720_MaxOutstandingR2T = 16;
 
 /*! Minimum maximum outstanding R2T value per RFC3720. */
 static const unsigned int kRFC3720_MaxOutstandingR2T_Min = 1;

@@ -31,6 +31,7 @@
 
 // IOKit includes
 #include <IOKit/IOService.h>
+#include <IOKit/IOKitKeys.h>
 #include <IOKit/scsi/spi/IOSCSIParallelInterfaceController.h>
 #include <IOKit/scsi/IOSCSIProtocolInterface.h>
 
@@ -43,6 +44,7 @@
 #include "iSCSITypesShared.h"
 #include "iSCSIHBATypes.h"
 #include "iSCSIPDUKernel.h"
+#include "iSCSITaskTag.h"
 
 // BSD socket includes
 #include <sys/kernel_types.h>
@@ -115,6 +117,11 @@ public:
     /*! Returns the maximum number of tasks that this virtual HBA can
      *  process at any one time. */
 	virtual UInt32 ReportMaximumTaskCount();
+
+    /*! Reports the I/O constraints for this controller. Overridden to raise
+     *  the maximum single-I/O size to 1MB (matching MaxBurstLength) so the
+     *  block layer issues larger transfers instead of the base-class default. */
+	virtual void ReportHBAConstraints(OSDictionary * constraints);
 
     /*! Returns the data size associated with a particular task (0). */
 	virtual UInt32 ReportHBASpecificTaskDataSize();
@@ -444,46 +451,6 @@ private:
     /*! Default timeout for new connections (seconds). */
     static const UInt32 kiSCSITCPTimeoutSec;
 
-    
-    /*! Used as part of the iSCSI layer intiator task tag to specify the 
-     *  type of task. */
-    enum InitiatorTaskTypes {
-        
-        /*! Used as part of the iSCSI task tag for all SCSI tasks. */
-        kInitiatorTaskTypeSCSITask = 0,
-    
-        /*! Used as part of the iSCSI task tag for latency measurement task. */
-        kInitiatorTaskTypeLatency = 1,
-    
-        /*! Used as part of the iSCSI task tag for all task management operations. */
-        kInitiatorTaskTypeTaskMgmt = 2
-    };
-    
-    /*! Creates the iSCSI layer's initiator task tag for a PDU using the task
-     *  code, LUN, and the SCSI layer's task identifier. */
-    inline UInt32 BuildInitiatorTaskTag(InitiatorTaskTypes taskType,
-                                        SCSILogicalUnitNumber LUN,
-                                        SCSITaggedTaskIdentifier taskId)
-    {
-        // The task tag is constructed using the HBA controller task ID, the
-        // LUN and a taskCode that maps to differnet *types* of iSCSI tasks
-        return ( (UInt32)taskId | ((UInt32)LUN)<<16 | ((UInt32)taskType)<<24 );
-    }
-    
-    inline InitiatorTaskTypes ParseInitiatorTaskTagForTaskType(UInt32 initiatorTaskTag)
-    {
-        return (InitiatorTaskTypes)((initiatorTaskTag>>24) & 0xFF);
-    }
-    
-    inline SCSILogicalUnitNumber ParseInitiatorTaskTagForLUN(UInt32 initiatorTaskTag)
-    {
-        return (UInt32)((initiatorTaskTag>>16) & 0xFF);
-    }
-    
-    inline SCSITaggedTaskIdentifier ParseInitiatorTaskTagForTaskId(UInt32 initiatorTaskTag)
-    {
-        return (UInt32)(initiatorTaskTag & 0xFFFF);
-    }
     
     inline void SetDataSegmentLength(iSCSIPDUInitiatorBHS * bhs,UInt32 length)
     {

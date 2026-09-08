@@ -180,7 +180,7 @@ SCSIServiceResponse iSCSIVirtualHBA::AbortTaskRequest(SCSITargetIdentifier targe
 
     // Create a SCSI target management PDU and send
     iSCSIPDUTaskMgmtReqBHS bhs = iSCSIPDUTaskMgmtReqBHSInit;
-    bhs.initiatorTaskTag = BuildInitiatorTaskTag(kInitiatorTaskTypeTaskMgmt,LUN,kiSCSIPDUTaskMgmtFuncAbortTask);
+    bhs.initiatorTaskTag = iSCSIBuildInitiatorTaskTag(iSCSITaskTypeTaskMgmt,LUN,kiSCSIPDUTaskMgmtFuncAbortTask);
     bhs.LUN = OSSwapHostToBigInt64(LUN);
     bhs.function = kiSCSIPDUTaskMgmtFuncFlag | kiSCSIPDUTaskMgmtFuncAbortTask;
     bhs.referencedTaskTag = OSSwapHostToBigInt32((UInt32)taggedTaskID);
@@ -203,7 +203,7 @@ SCSIServiceResponse iSCSIVirtualHBA::AbortTaskSetRequest(SCSITargetIdentifier ta
 
     // Create a SCSI target management PDU and send
     iSCSIPDUTaskMgmtReqBHS bhs = iSCSIPDUTaskMgmtReqBHSInit;
-    bhs.initiatorTaskTag = BuildInitiatorTaskTag(kInitiatorTaskTypeTaskMgmt,LUN,kiSCSIPDUTaskMgmtFuncAbortTaskSet);
+    bhs.initiatorTaskTag = iSCSIBuildInitiatorTaskTag(iSCSITaskTypeTaskMgmt,LUN,kiSCSIPDUTaskMgmtFuncAbortTaskSet);
     bhs.LUN = OSSwapHostToBigInt64(LUN);
     bhs.function = kiSCSIPDUTaskMgmtFuncFlag | kiSCSIPDUTaskMgmtFuncAbortTaskSet;
     
@@ -225,7 +225,7 @@ SCSIServiceResponse iSCSIVirtualHBA::ClearACARequest(SCSITargetIdentifier target
 
     // Create a SCSI target management PDU and send
     iSCSIPDUTaskMgmtReqBHS bhs = iSCSIPDUTaskMgmtReqBHSInit;
-    bhs.initiatorTaskTag = BuildInitiatorTaskTag(kInitiatorTaskTypeTaskMgmt,LUN,kiSCSIPDUTaskMgmtFuncClearACA);
+    bhs.initiatorTaskTag = iSCSIBuildInitiatorTaskTag(iSCSITaskTypeTaskMgmt,LUN,kiSCSIPDUTaskMgmtFuncClearACA);
     bhs.LUN = OSSwapHostToBigInt64(LUN);
     bhs.function = kiSCSIPDUTaskMgmtFuncFlag | kiSCSIPDUTaskMgmtFuncClearACA;
     
@@ -247,7 +247,7 @@ SCSIServiceResponse iSCSIVirtualHBA::ClearTaskSetRequest(SCSITargetIdentifier ta
 
     // Create a SCSI target management PDU and send
     iSCSIPDUTaskMgmtReqBHS bhs = iSCSIPDUTaskMgmtReqBHSInit;
-    bhs.initiatorTaskTag = BuildInitiatorTaskTag(kInitiatorTaskTypeTaskMgmt,LUN,kiSCSIPDUTaskMgmtFuncClearTaskSet);
+    bhs.initiatorTaskTag = iSCSIBuildInitiatorTaskTag(iSCSITaskTypeTaskMgmt,LUN,kiSCSIPDUTaskMgmtFuncClearTaskSet);
     bhs.LUN = OSSwapHostToBigInt64(LUN);
     bhs.function = kiSCSIPDUTaskMgmtFuncFlag | kiSCSIPDUTaskMgmtFuncClearTaskSet;
     
@@ -269,7 +269,7 @@ SCSIServiceResponse iSCSIVirtualHBA::LogicalUnitResetRequest(SCSITargetIdentifie
 
     // Create a SCSI target management PDU and send
     iSCSIPDUTaskMgmtReqBHS bhs = iSCSIPDUTaskMgmtReqBHSInit;
-    bhs.initiatorTaskTag = BuildInitiatorTaskTag(kInitiatorTaskTypeTaskMgmt,LUN,kiSCSIPDUTaskMgmtFuncLUNReset);
+    bhs.initiatorTaskTag = iSCSIBuildInitiatorTaskTag(iSCSITaskTypeTaskMgmt,LUN,kiSCSIPDUTaskMgmtFuncLUNReset);
     bhs.LUN = OSSwapHostToBigInt64(LUN);
     bhs.function = kiSCSIPDUTaskMgmtFuncFlag | kiSCSIPDUTaskMgmtFuncLUNReset;
     
@@ -291,7 +291,7 @@ SCSIServiceResponse iSCSIVirtualHBA::TargetResetRequest(SCSITargetIdentifier tar
     // Create a SCSI target management PDU and send
     iSCSIPDUTaskMgmtReqBHS bhs = iSCSIPDUTaskMgmtReqBHSInit;
     bhs.function = kiSCSIPDUTaskMgmtFuncFlag | kiSCSIPDUTaskMgmtFuncTargetWarmReset;
-    bhs.initiatorTaskTag = BuildInitiatorTaskTag(kInitiatorTaskTypeTaskMgmt,0,kiSCSIPDUTaskMgmtFuncTargetWarmReset);
+    bhs.initiatorTaskTag = iSCSIBuildInitiatorTaskTag(iSCSITaskTypeTaskMgmt,0,kiSCSIPDUTaskMgmtFuncTargetWarmReset);
     
     if(SendPDU(session,session->connections[0],(iSCSIPDUInitiatorBHS *)&bhs,NULL,NULL,0))
         return kSCSIServiceResponse_SERVICE_DELIVERY_OR_TARGET_FAILURE;
@@ -313,6 +313,32 @@ SCSIDeviceIdentifier iSCSIVirtualHBA::ReportHighestSupportedDeviceID()
 UInt32 iSCSIVirtualHBA::ReportMaximumTaskCount()
 {
 	return kMaxTaskCount;
+}
+
+void iSCSIVirtualHBA::ReportHBAConstraints(OSDictionary * constraints)
+{
+	// The base class provides conservative defaults; overridden to raise the
+	// max single-I/O size to 1MB (== MaxBurstLength) so the SCSI block layer
+	// issues larger transfers. All required keys must be set here.
+	if(!constraints)
+		return;
+
+	const UInt64 kMaxTransferBytes = 1024 * 1024;   // 1MB
+
+	constraints->setObject(kIOMaximumSegmentByteCountReadKey,
+		OSNumber::withNumber(kMaxTransferBytes, 64));
+	constraints->setObject(kIOMaximumSegmentByteCountWriteKey,
+		OSNumber::withNumber(kMaxTransferBytes, 64));
+	constraints->setObject(kIOMaximumSegmentCountReadKey,
+		OSNumber::withNumber((UInt64)256, 32));
+	constraints->setObject(kIOMaximumSegmentCountWriteKey,
+		OSNumber::withNumber((UInt64)256, 32));
+	constraints->setObject(kIOMinimumSegmentAlignmentByteCountKey,
+		OSNumber::withNumber((UInt64)4, 32));
+	constraints->setObject(kIOMaximumSegmentAddressableBitCountKey,
+		OSNumber::withNumber((UInt64)64, 32));
+	constraints->setObject(kIOMinimumHBADataAlignmentMaskKey,
+		OSNumber::withNumber((UInt64)0, 64));
 }
 
 UInt32 iSCSIVirtualHBA::ReportHBASpecificTaskDataSize()
@@ -561,7 +587,7 @@ SCSIServiceResponse iSCSIVirtualHBA::ProcessParallelTask(SCSIParallelTaskIdentif
     OSAddAtomic64(GetRequestedDataTransferCount(parallelTask),&connection->dataToTransfer);
 
     // Build and set iSCSI initiator task tag
-    UInt32 initiatorTaskTag = BuildInitiatorTaskTag(kInitiatorTaskTypeSCSITask,LUN,taskId);
+    UInt32 initiatorTaskTag = iSCSIBuildInitiatorTaskTag(iSCSITaskTypeSCSITask,LUN,taskId);
     SetControllerTaskIdentifier(parallelTask,initiatorTaskTag);
     
     DBLog("iscsi: Transfer size: %llu (sid: %d, cid: %d)\n",
@@ -593,7 +619,7 @@ void iSCSIVirtualHBA::BeginTaskOnWorkloopThread(iSCSIVirtualHBA * owner,
     }
 
     // Task tag corresponding to a connection timeout measurement
-    if(owner->ParseInitiatorTaskTagForTaskType(initiatorTaskTag) == kInitiatorTaskTypeLatency)  {
+    if(iSCSIParseInitiatorTaskTagForTaskType(initiatorTaskTag) == iSCSITaskTypeLatency)  {
         owner->MeasureConnectionLatency(session,connection);
         return;
     }
@@ -835,7 +861,7 @@ void iSCSIVirtualHBA::CompleteParallelTask(iSCSISession * session,
         connection->bytesPerSecHistoryIdx = 0;
         
         // Queue a latency measurement operation
-        UInt32 initiatorTaskTag = BuildInitiatorTaskTag(kInitiatorTaskTypeLatency,0,0);
+        UInt32 initiatorTaskTag = iSCSIBuildInitiatorTaskTag(iSCSITaskTypeLatency,0,0);
         connection->taskQueue->queueTask(initiatorTaskTag);
     }
     
@@ -856,8 +882,8 @@ void iSCSIVirtualHBA::ProcessTaskMgmtRsp(iSCSISession * session,
                                          iSCSIPDU::iSCSIPDUTaskMgmtRspBHS * bhs)
 {
     // Extract LUN and function code from task tag
-    UInt8 taskMgmtFunction = ParseInitiatorTaskTagForTaskId(bhs->initiatorTaskTag);
-    UInt64 LUN = ParseInitiatorTaskTagForLUN(bhs->initiatorTaskTag);
+    UInt8 taskMgmtFunction = iSCSIParseInitiatorTaskTagForTaskId(bhs->initiatorTaskTag);
+    UInt64 LUN = iSCSIParseInitiatorTaskTagForLUN(bhs->initiatorTaskTag);
     
     // Setup the SCSI response code based on response from PDU
     SCSIServiceResponse serviceResponse;
@@ -1631,6 +1657,11 @@ errno_t iSCSIVirtualHBA::CreateConnection(SessionIdentifier sessionId,
     // Initialize default error (try again)
     errno_t error = EAGAIN;
 
+    // Socket tuning values (declared here so the goto-based error paths below
+    // don't jump over their initializers).
+    int bufSize = 512 * 1024;   // macOS doubles this, effective ~1MB
+    int nodelay = 1;
+
     if(!(newConn->taskQueue = OSTypeAlloc(iSCSITaskQueue)))
         goto TASKQUEUE_ALLOC_FAILURE;
     
@@ -1674,6 +1705,12 @@ errno_t iSCSIVirtualHBA::CreateConnection(SessionIdentifier sessionId,
     // Set connection timeout...
     sock_setsockopt(newConn->socket,IPPROTO_TCP,TCP_CONNECTIONTIMEOUT,(const void*)&timeout,sizeof(struct timeval));
 
+    // Enlarge TCP buffers BEFORE connect so window scaling negotiates the
+    // larger receive window. Setting SO_RCVBUF after connect is too late and
+    // caps throughput at the default buffer size.
+    sock_setsockopt(newConn->socket,SOL_SOCKET,SO_SNDBUF,(const void*)&bufSize,sizeof(bufSize));
+    sock_setsockopt(newConn->socket,SOL_SOCKET,SO_RCVBUF,(const void*)&bufSize,sizeof(bufSize));
+
     // Bind socket to a particular host connection
     error = sock_bind(newConn->socket,(sockaddr*)hostSockaddr);
     IOLog("ISCSIX: sock_bind hostfamily=%d err=%d\n",hostSockaddr->ss_family,error);
@@ -1689,6 +1726,10 @@ errno_t iSCSIVirtualHBA::CreateConnection(SessionIdentifier sessionId,
     // Set socket to non-blocking & set timeouts
     sock_setsockopt(newConn->socket,SOL_SOCKET,SO_SNDTIMEO,(const void*)&timeout,sizeof(struct timeval));
     sock_setsockopt(newConn->socket,SOL_SOCKET,SO_RCVTIMEO,(const void*)&timeout,sizeof(struct timeval));
+
+    // Disable Nagle so small PDUs (command/response headers) aren't delayed by
+    // the Nagle + delayed-ACK interaction.
+    sock_setsockopt(newConn->socket,IPPROTO_TCP,TCP_NODELAY,(const void*)&nodelay,sizeof(nodelay));
 
     // Initialize queue that keeps track of connection speed. Clear the whole
     // array: bytesPerSecondHistory is UInt32[30] (120 bytes), so the previous
@@ -2042,7 +2083,7 @@ errno_t iSCSIVirtualHBA::SendPDU(iSCSISession * session,
     errno_t error;
     
     error = sock_send(connection->socket,&msg,0,&bytesSent);
-    IOLog("ISCSIX: SendPDU sock_send err=%d bytesSent=%zu\n",error,bytesSent);
+    DBLog("ISCSIX: SendPDU sock_send err=%d bytesSent=%zu\n",error,bytesSent);
     if(error)
     {
         DBLog("iscsi: sock_send error returned with code %d (sid: %d, cid: %d)\n",error,session->sessionId,connection->cid);
@@ -2114,7 +2155,7 @@ errno_t iSCSIVirtualHBA::RecvPDUHeader(iSCSISession * session,
 
     // Handle connection problems
     error = sock_receive(connection->socket,&msg,MSG_WAITALL,&bytesRecv);
-    IOLog("ISCSIX: RecvPDUHeader sock_receive err=%d bytesRecv=%zu useHdrDigest=%d\n",error,bytesRecv,connection->useHeaderDigest);
+    DBLog("ISCSIX: RecvPDUHeader sock_receive err=%d bytesRecv=%zu useHdrDigest=%d\n",error,bytesRecv,connection->useHeaderDigest);
     if(error)
     {
         if(error != EWOULDBLOCK) {
