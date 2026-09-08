@@ -1142,6 +1142,8 @@ CFStringRef iSCSIPreferencesCopyTargetCHAPName(iSCSIPreferencesRef preferences,C
 {
     CFMutableDictionaryRef targetDict = iSCSIPreferencesGetTargetDict(preferences,targetIQN,true);
     CFStringRef name = CFDictionaryGetValue(targetDict,kiSCSIPKAuthCHAPName);
+    if(!name)
+        return NULL;
     return CFStringCreateCopy(kCFAllocatorDefault,name);
 }
 

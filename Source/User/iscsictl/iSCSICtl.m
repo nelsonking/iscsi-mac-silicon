@@ -306,10 +306,10 @@ void iSCSICtlParseSwitchesToDictionary(CFArrayRef arguments,
                 CFRelease(arg);
             }
 
-            if(nextArg)
-                CFRelease(nextArg);
+            // NOTE: thisArg/nextArg are borrowed references from
+            // CFArrayGetValueAtIndex; do NOT CFRelease them (that over-releases
+            // the strings in `arguments` and corrupts the array).
         }
-        CFRelease(thisArg);
     }
 }
 
@@ -1644,7 +1644,7 @@ errno_t iSCSICtlListTarget(CFDictionaryRef options)
     }
     
     displayTargetInfo(target,properties);
-    
+
     // Retrieve last known target alias (if available) and display it
     CFStringRef targetAlias = iSCSIPreferencesGetTargetAlias(preferences,targetIQN);
     if(!targetAlias)
@@ -1743,9 +1743,9 @@ errno_t iSCSICtlListTarget(CFDictionaryRef options)
 
     targetAuth = CFStringCreateWithFormat(kCFAllocatorDefault,0,format,
                          authMethod,
-                         kOptKeyCHAPName,CHAPName,
+                         kOptKeyCHAPName,CHAPName ? CHAPName : CFSTR(""),
                          kOptKeyCHAPSecret,CHAPSecret);
-    CFRelease(CHAPName);
+    if(CHAPName) CFRelease(CHAPName);
 
     iSCSICtlDisplayString(targetParams);
     iSCSICtlDisplayString(targetAuth);
@@ -1761,9 +1761,9 @@ errno_t iSCSICtlListTarget(CFDictionaryRef options)
 
         // Get negotiated portal parameters
         CFDictionaryRef properties = NULL;
-        
+
         if(!error)
-            iSCSIDaemonCreateCFPropertiesForConnection(handle,target,portal);
+            properties = iSCSIDaemonCreateCFPropertiesForConnection(handle,target,portal);
 
         if(properties) {
             CFNumberRef headerDigest = CFDictionaryGetValue(properties,kRFC3720_Key_HeaderDigest);

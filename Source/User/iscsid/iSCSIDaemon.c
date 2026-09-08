@@ -1456,17 +1456,22 @@ void iSCSIDProcessQueuedLogin(SCNetworkReachabilityRef reachabilityTarget,
                               void * info)
 {
     struct iSCSIDQueueLoginForTargetPortal * loginRef = info;
+    // Cancel the callback before freeing loginRef; otherwise a subsequent
+    // reachability transition re-invokes this handler with a freed loginRef
+    // (use-after-free -> CFDictionaryCreateMutableCopy(NULL) crash).
+    SCNetworkReachabilitySetCallback(reachabilityTarget, NULL, NULL);
+    SCNetworkReachabilityUnscheduleFromRunLoop(reachabilityTarget, CFRunLoopGetMain(), kCFRunLoopDefaultMode);
     
     iSCSIMutableTargetRef target = iSCSITargetCreateMutableCopy(loginRef->target);
     iSCSIPortalRef portal = loginRef->portal;
-    
+
     enum iSCSILoginStatusCode statusCode;
     iSCSIDLoginWithPortal(target,portal,&statusCode);
     
     iSCSITargetRelease(target);
     iSCSITargetRelease(loginRef->target);
     iSCSIPortalRelease(portal);
-    
+
     free(loginRef);
 }
 

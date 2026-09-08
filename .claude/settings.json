@@ -3,7 +3,9 @@
     "allow": [
       "Bash(ioreg -l -w 0)",
       "Bash(ioreg -c SCSISubsystemGlobals)",
-      "Bash(ioreg -n SCSISubsystemGlobals)"
+      "Bash(ioreg -n SCSISubsystemGlobals)",
+      "Bash(git log *)",
+      "Bash(./build_kext.sh)"
     ],
     "additionalDirectories": [
       "/tmp"
