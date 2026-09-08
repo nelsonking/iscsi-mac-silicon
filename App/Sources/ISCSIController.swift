@@ -157,6 +157,10 @@ final class ISCSIController: ObservableObject {
             if let disk = await self.rt(id).bsdDisk {
                 _ = Shell.run("/usr/sbin/diskutil", ["unmountDisk", "force", "/dev/\(disk)"], timeout: 20)
             }
+            // Disable auto-login/persistent first, otherwise the daemon re-logs
+            // in right after this manual logout (they're enabled by doConnect).
+            _ = Shell.runPrivileged([Self.iscsictl, "modify", "target-config", t.ctlTarget,
+                                     "-auto-login", "disable", "-persistent", "disable"], timeout: 15)
             let r = Shell.runPrivileged([Self.iscsictl, "logout", t.iqn], timeout: 30)
             await MainActor.run {
                 self.busy.remove(id)
