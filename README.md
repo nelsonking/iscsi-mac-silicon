@@ -14,7 +14,7 @@
 | 应用主界面 | 菜单栏 |
 |:---:|:---:|
 | ![应用主界面](assets/app.png) | ![菜单栏](assets/menu.png) |
-
+|![2.5G下速度](assets/speed.png) |
 
 ---
 
