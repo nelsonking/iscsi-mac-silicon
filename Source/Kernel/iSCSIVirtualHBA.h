@@ -356,6 +356,58 @@ private:
                                               void * arg0, void * arg1,
                                               void * arg2, void * arg3);
 
+    /*! The teardown entry points below (ReleaseConnection / ReleaseSession /
+     *  DeactivateConnection / DeactivateAllConnections / ReleaseAllSessions)
+     *  are also reachable from the daemon's user-client thread via
+     *  IOExternalMethod. Their bodies touch the base class's task pool
+     *  (FindTaskForControllerIdentifier / CompleteParallelTask) and free the
+     *  connection and its embedded taskQueue, so they must run on the workloop
+     *  — otherwise they race the data path and corrupt the task pool / queue.
+     *  Each public entry point therefore dispatches its body through the
+     *  command gate onto the workloop (the "*Gated" variants). */
+
+    /*! Runs the body of DeactivateConnection on the workloop thread. */
+    errno_t DeactivateConnectionGated(SessionIdentifier sessionId,
+                                      ConnectionIdentifier connectionId);
+
+    /*! Command-gate action trampoline that calls DeactivateConnectionGated. */
+    static IOReturn DeactivateConnectionAction(OSObject * owner,
+                                               void * arg0, void * arg1,
+                                               void * arg2, void * arg3);
+
+    /*! Runs the body of DeactivateAllConnections on the workloop thread. */
+    errno_t DeactivateAllConnectionsGated(SessionIdentifier sessionId);
+
+    /*! Command-gate action trampoline that calls DeactivateAllConnectionsGated. */
+    static IOReturn DeactivateAllConnectionsAction(OSObject * owner,
+                                                   void * arg0, void * arg1,
+                                                   void * arg2, void * arg3);
+
+    /*! Runs the body of ReleaseConnection on the workloop thread. */
+    void ReleaseConnectionGated(SessionIdentifier sessionId,
+                                ConnectionIdentifier connectionId);
+
+    /*! Command-gate action trampoline that calls ReleaseConnectionGated. */
+    static IOReturn ReleaseConnectionAction(OSObject * owner,
+                                            void * arg0, void * arg1,
+                                            void * arg2, void * arg3);
+
+    /*! Runs the body of ReleaseSession on the workloop thread. */
+    void ReleaseSessionGated(SessionIdentifier sessionId);
+
+    /*! Command-gate action trampoline that calls ReleaseSessionGated. */
+    static IOReturn ReleaseSessionAction(OSObject * owner,
+                                         void * arg0, void * arg1,
+                                         void * arg2, void * arg3);
+
+    /*! Runs the body of ReleaseAllSessions on the workloop thread. */
+    void ReleaseAllSessionsGated();
+
+    /*! Command-gate action trampoline that calls ReleaseAllSessionsGated. */
+    static IOReturn ReleaseAllSessionsAction(OSObject * owner,
+                                             void * arg0, void * arg1,
+                                             void * arg2, void * arg3);
+
     /*! Process an incoming task management response PDU.
      *  @param session the session associated with the task mgmt response.
      *  @param connection the connection associated with the task mgmt response.

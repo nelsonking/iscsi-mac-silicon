@@ -1564,15 +1564,39 @@ SESSION_ID_ALLOC_FAILURE:
 /*! Releases all iSCSI sessions. */
 void iSCSIVirtualHBA::ReleaseAllSessions()
 {
+    // Serialize onto the workloop (see the teardown note in the header). Guard
+    // against a NULL command gate: during controller termination the gate may
+    // already be released, in which case the workloop is gone and running
+    // directly is safe.
+    IOCommandGate * gate = GetCommandGate();
+    if(!gate) {
+        ReleaseAllSessionsGated();
+        return;
+    }
+    gate->runAction((IOCommandGate::Action)ReleaseAllSessionsAction);
+}
+
+/*! Runs the body of ReleaseAllSessions on the workloop thread. */
+void iSCSIVirtualHBA::ReleaseAllSessionsGated()
+{
     // Go through every connection for each session, and close sockets,
     // remove event sources, etc
     for(SessionIdentifier index = 0; index < kMaxSessions; index++)
     {
         if(!sessionList[index])
             continue;
-        
-        ReleaseSession(index);
+
+        ReleaseSessionGated(index);
     }
+}
+
+/*! Command-gate action trampoline that calls ReleaseAllSessionsGated. */
+IOReturn iSCSIVirtualHBA::ReleaseAllSessionsAction(OSObject * owner,
+                                                   void * arg0, void * arg1,
+                                                   void * arg2, void * arg3)
+{
+    ((iSCSIVirtualHBA *)owner)->ReleaseAllSessionsGated();
+    return kIOReturnSuccess;
 }
 
 /*! Releases an iSCSI session, including all connections associated with that
@@ -1580,36 +1604,44 @@ void iSCSIVirtualHBA::ReleaseAllSessions()
  *  @param sessionId the session qualifier part of the ISID. */
 void iSCSIVirtualHBA::ReleaseSession(SessionIdentifier sessionId)
 {
+    // Serialize onto the workloop (see the teardown note in the header).
+    GetCommandGate()->runAction((IOCommandGate::Action)ReleaseSessionAction,
+                                (void *)(uintptr_t)sessionId);
+}
+
+/*! Runs the body of ReleaseSession on the workloop thread. */
+void iSCSIVirtualHBA::ReleaseSessionGated(SessionIdentifier sessionId)
+{
     // Range-check inputs
     if(sessionId >= kMaxSessions)
         return;
-    
+
     // Do nothing if session doesn't exist
     iSCSISession * theSession = sessionList[sessionId];
-    
+
     if(!theSession)
         return;
-    
+
     DBLog("iscsi: Releasing session (sid %d)\n",sessionId);
-    
+
     // Disconnect all connections
     for(ConnectionIdentifier connectionId = 0; connectionId < kMaxConnectionsPerSession; connectionId++)
     {
         if(theSession->connections[connectionId])
-            ReleaseConnection(sessionId,connectionId);
+            ReleaseConnectionGated(sessionId,connectionId);
     }
-    
+
     // Prevent others from accessing the session
     sessionList[sessionId] = NULL;
-    
+
     // Free connection list and session object
     IOFree(theSession->connections,kMaxConnectionsPerSession*sizeof(iSCSIConnection*));
     IOFree(theSession,sizeof(iSCSISession));
-    
+
     // Remove target name from dictionary
     OSCollectionIterator * iter = OSCollectionIterator::withCollection(targetList);
     OSString * targetIQN;
-    
+
     while((targetIQN = (OSString *)iter->getNextObject()))
     {
         OSNumber * targetId = (OSNumber*)targetList->getObject(targetIQN);
@@ -1619,6 +1651,15 @@ void iSCSIVirtualHBA::ReleaseSession(SessionIdentifier sessionId)
             break;
         }
     }
+}
+
+/*! Command-gate action trampoline that calls ReleaseSessionGated. */
+IOReturn iSCSIVirtualHBA::ReleaseSessionAction(OSObject * owner,
+                                               void * arg0, void * arg1,
+                                               void * arg2, void * arg3)
+{
+    ((iSCSIVirtualHBA *)owner)->ReleaseSessionGated((SessionIdentifier)(uintptr_t)arg0);
+    return kIOReturnSuccess;
 }
 
 /*! Allocates a new iSCSI connection associated with the particular session.
@@ -1806,42 +1847,62 @@ TASKQUEUE_ALLOC_FAILURE:
 void iSCSIVirtualHBA::ReleaseConnection(SessionIdentifier sessionId,
                                         ConnectionIdentifier connectionId)
 {
+    // Serialize onto the workloop (see the teardown note in the header).
+    GetCommandGate()->runAction((IOCommandGate::Action)ReleaseConnectionAction,
+                                (void *)(uintptr_t)sessionId,
+                                (void *)(uintptr_t)connectionId);
+}
+
+/*! Runs the body of ReleaseConnection on the workloop thread. */
+void iSCSIVirtualHBA::ReleaseConnectionGated(SessionIdentifier sessionId,
+                                             ConnectionIdentifier connectionId)
+{
     // Range-check inputs
     if(sessionId >= kMaxSessions || connectionId >= kMaxConnectionsPerSession)
         return;
-    
+
     // Do nothing if session doesn't exist
     iSCSISession * session = sessionList[sessionId];
-    
+
     if(!session)
         return;
 
     iSCSIConnection * connection = session->connections[connectionId];
-        
+
     if(!connection)
         return;
-    
+
     // First deactivate connection before proceeding
     if(connection->taskQueue->isEnabled())
-        DeactivateConnection(sessionId,connectionId);
+        DeactivateConnectionGated(sessionId,connectionId);
 
     // Prevents other from trying to access this connection...
     session->connections[connectionId] = NULL;
-    
+
     sock_close(connection->socket);
 
     GetWorkLoop()->removeEventSource(connection->dataRecvEventSource);
     GetWorkLoop()->removeEventSource(connection->taskQueue);
-    
+
     DBLog("iscsi: Removed event sources (sid: %d, cid: %d)\n",sessionId,connectionId);
-    
+
     connection->dataRecvEventSource->release();
     connection->taskQueue->release();
     connection->dataToTransfer = 0;
-    
+
     IOFree(connection,sizeof(iSCSIConnection));
-    
+
     DBLog("iscsi: Released connection (sid: %d, cid: %d)\n",sessionId,connectionId);
+}
+
+/*! Command-gate action trampoline that calls ReleaseConnectionGated. */
+IOReturn iSCSIVirtualHBA::ReleaseConnectionAction(OSObject * owner,
+                                                  void * arg0, void * arg1,
+                                                  void * arg2, void * arg3)
+{
+    ((iSCSIVirtualHBA *)owner)->ReleaseConnectionGated((SessionIdentifier)(uintptr_t)arg0,
+                                                       (ConnectionIdentifier)(uintptr_t)arg1);
+    return kIOReturnSuccess;
 }
 
 /*! Activates an iSCSI connection, indicating to the kernel that the iSCSI
@@ -1921,35 +1982,47 @@ errno_t iSCSIVirtualHBA::ActivateAllConnections(SessionIdentifier sessionId)
  *  @return error code indicating result of operation. */
 errno_t iSCSIVirtualHBA::DeactivateConnection(SessionIdentifier sessionId,ConnectionIdentifier connectionId)
 {
+    // Serialize onto the workloop (see the teardown note in the header).
+    errno_t result = EINVAL;
+    GetCommandGate()->runAction((IOCommandGate::Action)DeactivateConnectionAction,
+                                (void *)(uintptr_t)sessionId,
+                                (void *)(uintptr_t)connectionId,
+                                &result);
+    return result;
+}
+
+/*! Runs the body of DeactivateConnection on the workloop thread. */
+errno_t iSCSIVirtualHBA::DeactivateConnectionGated(SessionIdentifier sessionId,ConnectionIdentifier connectionId)
+{
     if(sessionId >= kMaxSessions || connectionId >= kMaxConnectionsPerSession)
         return EINVAL;
-    
+
     // Do nothing if session doesn't exist
     iSCSISession * session = sessionList[sessionId];
-    
+
     if(!session)
         return EINVAL;
-    
+
     // Do nothing if connection doesn't exist
     iSCSIConnection * connection = session->connections[connectionId];
-    
+
     if(!connection)
         return EINVAL;
 
     connection->dataRecvEventSource->disable();
     connection->taskQueue->disable();
-    
+
     // Tell driver stack that tasks have been rejected (stack will reattempt
     // the task on a different connection, if one is available)
     UInt32 initiatorTaskTag = 0;
     SCSIParallelTaskIdentifier task;
- 
+
     while((initiatorTaskTag = connection->taskQueue->completeCurrentTask()) != 0)
     {
         task = FindTaskForControllerIdentifier(sessionId, initiatorTaskTag);
         if(!task)
             continue;
-        
+
         // Notify the SCSI driver stack that we couldn't finish these tasks
         // on this connection
         CompleteParallelTask(session,
@@ -1960,14 +2033,26 @@ errno_t iSCSIVirtualHBA::DeactivateConnection(SessionIdentifier sessionId,Connec
     }
 
     OSDecrementAtomic(&session->numActiveConnections);
-    
+
     // If this is the last active connection, un-mount the target
     if(session->numActiveConnections == 0)
         DestroyTargetForID(sessionId);
-    
+
     DBLog("iscsi: Deactivated connection (sid: %d, cid: %d)\n",sessionId,connectionId);
-    
+
     return 0;
+}
+
+/*! Command-gate action trampoline that calls DeactivateConnectionGated. */
+IOReturn iSCSIVirtualHBA::DeactivateConnectionAction(OSObject * owner,
+                                                     void * arg0, void * arg1,
+                                                     void * arg2, void * arg3)
+{
+    iSCSIVirtualHBA * hba = (iSCSIVirtualHBA *)owner;
+    errno_t * result = (errno_t *)arg2;
+    *result = hba->DeactivateConnectionGated((SessionIdentifier)(uintptr_t)arg0,
+                                             (ConnectionIdentifier)(uintptr_t)arg1);
+    return kIOReturnSuccess;
 }
 
 /*! Deactivates all iSCSI connections so that parameters can be adjusted or
@@ -1976,26 +2061,48 @@ errno_t iSCSIVirtualHBA::DeactivateConnection(SessionIdentifier sessionId,Connec
  *  @return error code indicating result of operation. */
 errno_t iSCSIVirtualHBA::DeactivateAllConnections(SessionIdentifier sessionId)
 {
+    // Serialize onto the workloop (see the teardown note in the header).
+    errno_t result = EINVAL;
+    GetCommandGate()->runAction((IOCommandGate::Action)DeactivateAllConnectionsAction,
+                                (void *)(uintptr_t)sessionId,
+                                &result);
+    return result;
+}
+
+/*! Runs the body of DeactivateAllConnections on the workloop thread. */
+errno_t iSCSIVirtualHBA::DeactivateAllConnectionsGated(SessionIdentifier sessionId)
+{
     if(sessionId >= kMaxSessions)
         return EINVAL;
-    
+
     // Do nothing if session doesn't exist
     iSCSISession * session = sessionList[sessionId];
-    
+
     if(!session)
         return EINVAL;
-    
+
     errno_t error = 0;
     for(ConnectionIdentifier connectionId = 0; connectionId < kMaxConnectionsPerSession; connectionId++)
     {
         if(session->connections[connectionId])
         {
-            if((error = DeactivateConnection(sessionId,connectionId)))
+            if((error = DeactivateConnectionGated(sessionId,connectionId)))
                 return error;
         }
     }
-    
+
     return 0;
+}
+
+/*! Command-gate action trampoline that calls DeactivateAllConnectionsGated. */
+IOReturn iSCSIVirtualHBA::DeactivateAllConnectionsAction(OSObject * owner,
+                                                         void * arg0, void * arg1,
+                                                         void * arg2, void * arg3)
+{
+    iSCSIVirtualHBA * hba = (iSCSIVirtualHBA *)owner;
+    errno_t * result = (errno_t *)arg1;
+    *result = hba->DeactivateAllConnectionsGated((SessionIdentifier)(uintptr_t)arg0);
+    return kIOReturnSuccess;
 }
 
 /*! Sends data over a kernel socket associated with iSCSI.  If the specified

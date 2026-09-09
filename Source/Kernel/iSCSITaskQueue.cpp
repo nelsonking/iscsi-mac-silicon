@@ -87,11 +87,23 @@ void iSCSITaskQueue::queueTask(UInt32 initiatorTaskTag)
  *  @return the iSCSI task tag for the task that was just completed. */
 UInt32 iSCSITaskQueue::completeCurrentTask()
 {
-    // With pipelining, tasks are dequeued at dispatch time (see checkForWork),
-    // so completion needs no queue bookkeeping. Completion is tracked by the
-    // SCSI subsystem (FindTaskForControllerIdentifier). Kept as a no-op to
-    // preserve the call sites.
-    return 0;
+    // With pipelining, checkForWork dequeues tasks at dispatch time, so this is
+    // normally a no-op during steady-state I/O. It is still used by teardown
+    // (DeactivateConnection/HandleTimeout) to drain any tasks that were queued
+    // but not yet dispatched, so it must dequeue-and-return the next tag under
+    // the same lock as checkForWork.
+    UInt32 taskTag = 0;
+
+    IOLockLock(queueLock);
+    if(!queue_empty(&taskQueue)) {
+        iSCSITask * task = (iSCSITask *)queue_first(&taskQueue);
+        taskTag = task->initiatorTaskTag;
+        queue_remove_first(&taskQueue, task, iSCSITask *, queueChain);
+        IOFree(task, sizeof(iSCSITask));
+    }
+    IOLockUnlock(queueLock);
+
+    return taskTag;
 }
 
 
