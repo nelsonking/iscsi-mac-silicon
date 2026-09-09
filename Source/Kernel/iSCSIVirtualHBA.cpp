@@ -381,7 +381,12 @@ bool iSCSIVirtualHBA::InitializeController()
         return false;
     
     memset(sessionList,0,kMaxSessions*sizeof(iSCSISession *));
-    
+
+    // Lock serializing access to the base class's (non-thread-safe) task queue.
+    taskListLock = IORecursiveLockAlloc();
+    if(!taskListLock)
+        return false;
+
     // Set product name.
     SetHBAProperty(kIOPropertyProductNameKey,OSString::withCString(ISCSI_PRODUCT_NAME));
     SetHBAProperty(kIOPropertyProductRevisionLevelKey,OSString::withCString(ISCSI_PRODUCT_REVISION_LEVEL));
@@ -403,10 +408,17 @@ void iSCSIVirtualHBA::TerminateController()
     DBLog("iscsi: Terminating virtual HBA\n");
     
     ReleaseAllSessions();
-    
-    // Free up our list of sessions and targets
+
+    // Free up our list of sessions and targets, and null sessionList so any
+    // late SCSI-stack callback (ProcessParallelTask / HandleTimeout) that runs
+    // before the command gate is released won't dereference freed memory.
     IOFree(sessionList,kMaxSessions*sizeof(iSCSISession*));
+    sessionList = NULL;
     targetList->free();
+
+    if(taskListLock)
+        IORecursiveLockFree(taskListLock);
+    taskListLock = NULL;
 }
 
 bool iSCSIVirtualHBA::StartController()
@@ -429,14 +441,22 @@ void iSCSIVirtualHBA::HandleInterruptRequest()
 void iSCSIVirtualHBA::HandleTimeout(SCSIParallelTaskIdentifier task)
 {
     // HandleTimeout runs in the SCSI stack timer context, NOT the workloop.
-    // Serialize the entire body onto the workloop via the command gate so that
-    // taskQueue operations and connection release (DeactivateConnection /
+    // Serialize the entire body against the workloop via the command gate so
+    // that taskQueue operations and connection release (DeactivateConnection /
     // ReleaseConnection -> IOFree) cannot race with the data path
     // (BeginTask/ProcessDataIn/ProcessSCSIResponse) that touches the same
     // connection/taskQueue. Otherwise a connection freed here can be
     // dereferenced by the workloop -> use-after-free -> corrupted return
-    // address -> kernel panic.
-    GetCommandGate()->runAction((IOCommandGate::Action)HandleTimeoutAction, task);
+    // address -> kernel panic. runAction executes on the caller's thread while
+    // holding the gate, so it is mutually exclusive with the workloop.
+    IOCommandGate * gate = GetCommandGate();
+    if(!gate) {
+        // During termination the gate/workloop may already be gone, so run the
+        // body directly (see the teardown note in the header).
+        HandleTimeoutGated(task);
+        return;
+    }
+    gate->runAction((IOCommandGate::Action)HandleTimeoutAction, task);
 }
 
 IOReturn iSCSIVirtualHBA::HandleTimeoutAction(OSObject * owner,
@@ -457,7 +477,10 @@ void iSCSIVirtualHBA::HandleTimeoutGated(SCSIParallelTaskIdentifier task)
     
     if(connectionId >= kMaxConnectionsPerSession)
         return;
-    
+
+    if(!sessionList)
+        return;
+
     iSCSISession * session = sessionList[sessionId];
     if(!session)
         return;
@@ -479,8 +502,10 @@ void iSCSIVirtualHBA::HandleTimeoutGated(SCSIParallelTaskIdentifier task)
         return;
     }
 
-    // Let task queue know that the last (current) task should be removed
-    connection->taskQueue->completeCurrentTask();
+    // Remove the specific timed-out task from the queue (under pipelining the
+    // task has usually already been dequeued by checkForWork, in which case
+    // this is a no-op; the head of the queue is a different task).
+    connection->taskQueue->removeTask((UInt32)GetControllerTaskIdentifier(task));
     
     // Notify the SCSI stack that the task could not be delivered
     CompleteParallelTask(session,
@@ -497,7 +522,10 @@ void iSCSIVirtualHBA::HandleConnectionTimeout(SessionIdentifier sessionId,Connec
 {
     // If this is the last connection, release the session...
     iSCSISession * session;
-    
+
+    if(!sessionList)
+        return;
+
     if(!(session = sessionList[sessionId]))
        return;
 
@@ -534,13 +562,19 @@ SCSIServiceResponse iSCSIVirtualHBA::ProcessParallelTask(SCSIParallelTaskIdentif
     // ProcessParallelTask runs on the SCSI stack thread, NOT the workloop. The
     // body below touches the base class's task list (SetControllerTaskIdentifier)
     // and the taskQueue, which the data path (ProcessDataIn/CompleteParallelTask)
-    // also touches on the workloop. Serialize the whole body onto the workloop
-    // via the command gate so those accesses can't race (the "corrupt list"
-    // panic). runAction runs the action inline if already on the workloop
-    // (re-entrant completion path), so no deadlock.
+    // also touches on the workloop. Serialize the whole body against the
+    // workloop via the command gate so those accesses can't race (the "corrupt
+    // list" panic). runAction executes the action on the calling thread while
+    // holding the gate, so it is mutually exclusive with the workloop; if it is
+    // called while already on the workloop it runs inline (re-entrant completion
+    // path), so no deadlock.
+    IOCommandGate * gate = GetCommandGate();
+    if(!gate)
+        return ProcessParallelTaskGated(parallelTask);   // gate/workloop gone during termination
+
     SCSIServiceResponse result = kSCSIServiceResponse_SERVICE_DELIVERY_OR_TARGET_FAILURE;
-    GetCommandGate()->runAction((IOCommandGate::Action)ProcessParallelTaskAction,
-                                parallelTask, &result);
+    gate->runAction((IOCommandGate::Action)ProcessParallelTaskAction,
+                    parallelTask, &result);
     return result;
 }
 
@@ -561,9 +595,12 @@ SCSIServiceResponse iSCSIVirtualHBA::ProcessParallelTaskGated(SCSIParallelTaskId
     SCSITargetIdentifier targetId   = GetTargetIdentifier(parallelTask);
     SCSILogicalUnitNumber LUN       = GetLogicalUnitNumber(parallelTask);
     SCSITaggedTaskIdentifier taskId = GetTaggedTaskIdentifier(parallelTask);
-    
+
+    if(!sessionList)
+        return kSCSIServiceResponse_FUNCTION_REJECTED;
+
     iSCSISession * session = sessionList[(SessionIdentifier)targetId];
-    
+
     if(!session)
         return kSCSIServiceResponse_FUNCTION_REJECTED;
     
@@ -611,16 +648,19 @@ SCSIServiceResponse iSCSIVirtualHBA::ProcessParallelTaskGated(SCSIParallelTaskId
     // Add the amount of data that we need to transfer to this connection
     OSAddAtomic64(GetRequestedDataTransferCount(parallelTask),&connection->dataToTransfer);
 
-    // Build and set iSCSI initiator task tag
+    // Build the iSCSI initiator task tag. NOTE: we deliberately do NOT call
+    // SetControllerTaskIdentifier() here — that inserts into the base class's
+    // task queue, which must happen on the workloop (the same thread that later
+    // calls FindTaskForControllerIdentifier / CompleteParallelTask) to avoid the
+    // "corrupt list" panic. It is done in BeginTaskOnWorkloopThread instead.
     UInt32 initiatorTaskTag = iSCSIBuildInitiatorTaskTag(iSCSITaskTypeSCSITask,LUN,taskId);
-    SetControllerTaskIdentifier(parallelTask,initiatorTaskTag);
-    
+
     DBLog("iscsi: Transfer size: %llu (sid: %d, cid: %d)\n",
           connection->dataToTransfer,session->sessionId,connection->cid);
-    
+
     // Queue task in the event source (we'll remove it from the queue when were
     // done processing the task)
-    connection->taskQueue->queueTask(initiatorTaskTag);
+    connection->taskQueue->queueTask(parallelTask, initiatorTaskTag);
     
     DBLog("iscsi: Queued task %#x (sid: %d, cid: %d)\n",
           initiatorTaskTag,session->sessionId,connection->cid);
@@ -631,6 +671,7 @@ SCSIServiceResponse iSCSIVirtualHBA::ProcessParallelTaskGated(SCSIParallelTaskId
 void iSCSIVirtualHBA::BeginTaskOnWorkloopThread(iSCSIVirtualHBA * owner,
                                                 iSCSISession * session,
                                                 iSCSIConnection * connection,
+                                                SCSIParallelTaskIdentifier parallelTask,
                                                 UInt32 initiatorTaskTag)
 {
     // Reject early if any required argument is NULL. BeginTask is dispatched
@@ -643,22 +684,27 @@ void iSCSIVirtualHBA::BeginTaskOnWorkloopThread(iSCSIVirtualHBA * owner,
         return;
     }
 
-    // Task tag corresponding to a connection timeout measurement
+    // Task tag corresponding to a connection timeout measurement. Latency tasks
+    // carry a NULL parallelTask, so handle them before touching parallelTask.
     if(iSCSIParseInitiatorTaskTagForTaskType(initiatorTaskTag) == iSCSITaskTypeLatency)  {
         owner->MeasureConnectionLatency(session,connection);
         return;
     }
-    
-    // Grab parallel task associated with this iSCSI task
-    SCSIParallelTaskIdentifier parallelTask =
-        owner->FindTaskForControllerIdentifier(session->sessionId,initiatorTaskTag);
-    
+
     if(!parallelTask)  {
         DBLog("iscsi: Task not found, flushing stream (BeginTaskOnWorkloopThread) (sid: %d, cid: %d)\n",
               session->sessionId,connection->cid);
         return;
     }
-    
+
+    // Associate the task tag with the parallel task in the base class's task
+    // queue. That queue is not thread-safe, so hold taskListLock — teardown
+    // (DeactivateConnection) runs on the caller's thread and also touches it,
+    // so the lock is required even though this runs on the workloop.
+    IORecursiveLockLock(owner->taskListLock);
+    owner->SetControllerTaskIdentifier(parallelTask, initiatorTaskTag);
+    IORecursiveLockUnlock(owner->taskListLock);
+
     // Extract information about this SCSI task
     SCSITaskAttribute attribute     = owner->GetTaskAttribute(parallelTask);
     UInt8   transferDirection       = owner->GetDataTransferDirection(parallelTask);
@@ -851,15 +897,20 @@ void iSCSIVirtualHBA::CompleteParallelTask(iSCSISession * session,
     // would panic. For a NULL request we still let the superclass complete so
     // the SCSI stack is informed.
     if(!session || !connection) {
-        if(parallelRequest)
+        if(parallelRequest) {
+            IORecursiveLockLock(taskListLock);
             super::CompleteParallelTask(parallelRequest,completionStatus,serviceResponse);
+            IORecursiveLockUnlock(taskListLock);
+        }
         return;
     }
     if(!parallelRequest)
         return;
 
     if(GetDataTransferDirection(parallelRequest) == kSCSIDataTransfer_NoDataTransfer) {
+        IORecursiveLockLock(taskListLock);
         super::CompleteParallelTask(parallelRequest,completionStatus,serviceResponse);
+        IORecursiveLockUnlock(taskListLock);
         return;
     }
 
@@ -871,13 +922,20 @@ void iSCSIVirtualHBA::CompleteParallelTask(iSCSISession * session,
     
     UInt64 duration_usecs = (secs  - connection->taskStartTimeSec)*1e6 +
                             (usecs - connection->taskStartTimeUSec);
-    
+
     // Calculate transfer speed over entire task...
     UInt64 bytesTransferred = GetRequestedDataTransferCount(parallelRequest);
 
-    // Add newest measurement to list (overwriting oldest one)
-    connection->bytesPerSecondHistory[connection->bytesPerSecHistoryIdx]
-        = (UInt32)(bytesTransferred / (duration_usecs / 1.0e6));
+    // A task can complete within the same microsecond (clock resolution),
+    // making duration_usecs == 0. Dividing by ~0 yields an absurd rate that
+    // overflows UInt32 (printed as "-1", which also breaks multi-connection
+    // load balancing since it reads as "fastest"). Skip such implausible
+    // samples, leaving the previous rate in the history slot.
+    if(duration_usecs > 0) {
+        double bps = (double)bytesTransferred * 1.0e6 / (double)duration_usecs;
+        if(bps < (double)0xFFFFFFFFULL)
+            connection->bytesPerSecondHistory[connection->bytesPerSecHistoryIdx] = (UInt32)bps;
+    }
     
     // Advance index so next oldest record is overwritten next time (roll over)
     connection->bytesPerSecHistoryIdx++;
@@ -885,9 +943,9 @@ void iSCSIVirtualHBA::CompleteParallelTask(iSCSISession * session,
     {
         connection->bytesPerSecHistoryIdx = 0;
         
-        // Queue a latency measurement operation
+        // Queue a latency measurement operation (no parallel task)
         UInt32 initiatorTaskTag = iSCSIBuildInitiatorTaskTag(iSCSITaskTypeLatency,0,0);
-        connection->taskQueue->queueTask(initiatorTaskTag);
+        connection->taskQueue->queueTask(NULL, initiatorTaskTag);
     }
     
     // Iterate over last few points, compute peak value
@@ -896,10 +954,12 @@ void iSCSIVirtualHBA::CompleteParallelTask(iSCSISession * session,
         if(connection->bytesPerSecond < connection->bytesPerSecondHistory[i])
             connection->bytesPerSecond = connection->bytesPerSecondHistory[i];
     
-    DBLog("iscsi: Bytes per second: %d (sid: %d, cid: %d)\n",
+    DBLog("iscsi: Bytes per second: %u (sid: %d, cid: %d)\n",
           connection->bytesPerSecond,session->sessionId,connection->cid);
 
+    IORecursiveLockLock(taskListLock);
     super::CompleteParallelTask(parallelRequest,completionStatus,serviceResponse);
+    IORecursiveLockUnlock(taskListLock);
 }
 
 void iSCSIVirtualHBA::ProcessTaskMgmtRsp(iSCSISession * session,
@@ -1048,9 +1108,13 @@ void iSCSIVirtualHBA::ProcessSCSIResponse(iSCSISession * session,
                   session->sessionId,connection->cid);
     }
 
-    // Grab parallel task associated with this PDU, indexed by task tag
+    // Grab parallel task associated with this PDU, indexed by task tag. Hold
+    // taskListLock — the base-class task queue is not thread-safe and teardown
+    // touches it from the caller's thread.
+    IORecursiveLockLock(taskListLock);
     SCSIParallelTaskIdentifier parallelTask =
         FindTaskForControllerIdentifier(session->sessionId,bhs->initiatorTaskTag);
+    IORecursiveLockUnlock(taskListLock);
 
     if(!parallelTask)
     {
@@ -1126,10 +1190,12 @@ void iSCSIVirtualHBA::ProcessDataIn(iSCSISession * session,
 {
     const UInt32 length = GetDataSegmentLength((iSCSIPDUTargetBHS*)bhs);
 
-    // Grab parallel task associated with this PDU, indexed by task tag
+    // Grab parallel task associated with this PDU, indexed by task tag.
+    IORecursiveLockLock(taskListLock);
     SCSIParallelTaskIdentifier parallelTask =
         FindTaskForControllerIdentifier(session->sessionId,bhs->initiatorTaskTag);
-    
+    IORecursiveLockUnlock(taskListLock);
+
     if(length == 0)
     {
         DBLog("iscsi: Missing data segment in data-in PDU (sid: %d, cid: %d)\n",
@@ -1228,10 +1294,16 @@ void iSCSIVirtualHBA::ProcessAsyncMsg(iSCSISession * session,
         RecvPDUData(session,connection,data,length,MSG_WAITALL);
     }
 
+    // Cache identifiers up front: the Release*/Deactivate* calls below run via
+    // the command gate and synchronously free the session/connection, so any
+    // later dereference of session/connection would be a use-after-free.
+    SessionIdentifier     sid = session->sessionId;
+    ConnectionIdentifier  cid = connection->cid;
+
     iSCSIPDUAsyncMsgEvent asyncEvent = (iSCSIPDUAsyncMsgEvent)(bhs->asyncEvent);
-    
+
     DBLog("iscsi: Async Message (code %#x) received (sid: %d, cid: %d)\n",
-        asyncEvent,session->sessionId,connection->cid);
+        asyncEvent,sid,cid);
     
     iSCSIHBAUserClient * client = (iSCSIHBAUserClient*)getClient();
     if(!client) {
@@ -1242,21 +1314,21 @@ void iSCSIVirtualHBA::ProcessAsyncMsg(iSCSISession * session,
     {
         // The target will drop all connections for this session
         case kiSCSIPDUAsyncMsgDropAllConnections:
-            ReleaseSession(session->sessionId);
+            ReleaseSession(sid);
             break;
 
         // The target will drop the specified connection
         case kiSCSIPDUAsynMsgDropConnection:
-            ReleaseConnection(session->sessionId,connection->cid);
+            ReleaseConnection(sid,cid);
             break;
-            
+
         case kiSCSIPDUAsyncMsgLogout:
-            DeactivateConnection(session->sessionId,connection->cid);
+            DeactivateConnection(sid,cid);
             break;
-            
+
         // Target requests parameter negotiation
         case kiSCSIPDUAsyncMsgNegotiateParams:
-            DeactivateConnection(session->sessionId,connection->cid);
+            DeactivateConnection(sid,cid);
             break;
             
         // No support for asynchronous SCSI messages; do nothing
@@ -1270,8 +1342,8 @@ void iSCSIVirtualHBA::ProcessAsyncMsg(iSCSISession * session,
     
     // Only send out a notification to the daemon if the
     // message is not vendor-specific or a SCSI message.
-    if(asyncEvent != kiSCSIPDUAsyncMsgSCSIAsyncMsg && asyncEvent != kiSCSIPDUAsyncMsgVendorCode)
-        client->sendAsyncMessageNotification(session->sessionId,connection->cid,asyncEvent);
+    if(client && asyncEvent != kiSCSIPDUAsyncMsgSCSIAsyncMsg && asyncEvent != kiSCSIPDUAsyncMsgVendorCode)
+        client->sendAsyncMessageNotification(sid,cid,asyncEvent);
 
     if(data)
         IOFree(data,length);
@@ -1285,10 +1357,12 @@ void iSCSIVirtualHBA::ProcessR2T(iSCSISession * session,
                                  iSCSIConnection * connection,
                                  iSCSIPDU::iSCSIPDUR2TBHS * bhs)
 {
-    // Grab parallel task associated with this PDU, indexed by task tag
+    // Grab parallel task associated with this PDU, indexed by task tag.
+    IORecursiveLockLock(taskListLock);
     SCSIParallelTaskIdentifier parallelTask =
         FindTaskForControllerIdentifier(session->sessionId,bhs->initiatorTaskTag);
-    
+    IORecursiveLockUnlock(taskListLock);
+
     if(!parallelTask)
     {
         DBLog("iscsi: Couldn't find requested task to process (sid: %d, cid: %d)\n",
@@ -1576,11 +1650,14 @@ void iSCSIVirtualHBA::ReleaseAllSessions()
     gate->runAction((IOCommandGate::Action)ReleaseAllSessionsAction);
 }
 
-/*! Runs the body of ReleaseAllSessions on the workloop thread. */
+/*! Runs the body of ReleaseAllSessions serialized against the workloop. */
 void iSCSIVirtualHBA::ReleaseAllSessionsGated()
 {
     // Go through every connection for each session, and close sockets,
     // remove event sources, etc
+    if(!sessionList)
+        return;
+
     for(SessionIdentifier index = 0; index < kMaxSessions; index++)
     {
         if(!sessionList[index])
@@ -1604,19 +1681,27 @@ IOReturn iSCSIVirtualHBA::ReleaseAllSessionsAction(OSObject * owner,
  *  @param sessionId the session qualifier part of the ISID. */
 void iSCSIVirtualHBA::ReleaseSession(SessionIdentifier sessionId)
 {
-    // Serialize onto the workloop (see the teardown note in the header).
-    GetCommandGate()->runAction((IOCommandGate::Action)ReleaseSessionAction,
-                                (void *)(uintptr_t)sessionId);
+    // Serialize against the workloop (see the teardown note in the header).
+    IOCommandGate * gate = GetCommandGate();
+    if(!gate) {
+        ReleaseSessionGated(sessionId);
+        return;
+    }
+    gate->runAction((IOCommandGate::Action)ReleaseSessionAction,
+                    (void *)(uintptr_t)sessionId);
 }
 
-/*! Runs the body of ReleaseSession on the workloop thread. */
+/*! Runs the body of ReleaseSession serialized against the workloop. */
 void iSCSIVirtualHBA::ReleaseSessionGated(SessionIdentifier sessionId)
 {
     // Range-check inputs
     if(sessionId >= kMaxSessions)
         return;
 
-    // Do nothing if session doesn't exist
+    // Do nothing if the session table is gone (termination) or session doesn't exist
+    if(!sessionList)
+        return;
+
     iSCSISession * theSession = sessionList[sessionId];
 
     if(!theSession)
@@ -1847,13 +1932,18 @@ TASKQUEUE_ALLOC_FAILURE:
 void iSCSIVirtualHBA::ReleaseConnection(SessionIdentifier sessionId,
                                         ConnectionIdentifier connectionId)
 {
-    // Serialize onto the workloop (see the teardown note in the header).
-    GetCommandGate()->runAction((IOCommandGate::Action)ReleaseConnectionAction,
-                                (void *)(uintptr_t)sessionId,
-                                (void *)(uintptr_t)connectionId);
+    // Serialize against the workloop (see the teardown note in the header).
+    IOCommandGate * gate = GetCommandGate();
+    if(!gate) {
+        ReleaseConnectionGated(sessionId, connectionId);
+        return;
+    }
+    gate->runAction((IOCommandGate::Action)ReleaseConnectionAction,
+                    (void *)(uintptr_t)sessionId,
+                    (void *)(uintptr_t)connectionId);
 }
 
-/*! Runs the body of ReleaseConnection on the workloop thread. */
+/*! Runs the body of ReleaseConnection serialized against the workloop. */
 void iSCSIVirtualHBA::ReleaseConnectionGated(SessionIdentifier sessionId,
                                              ConnectionIdentifier connectionId)
 {
@@ -1861,7 +1951,10 @@ void iSCSIVirtualHBA::ReleaseConnectionGated(SessionIdentifier sessionId,
     if(sessionId >= kMaxSessions || connectionId >= kMaxConnectionsPerSession)
         return;
 
-    // Do nothing if session doesn't exist
+    // Do nothing if the session table is gone (termination) or session doesn't exist
+    if(!sessionList)
+        return;
+
     iSCSISession * session = sessionList[sessionId];
 
     if(!session)
@@ -1982,22 +2075,29 @@ errno_t iSCSIVirtualHBA::ActivateAllConnections(SessionIdentifier sessionId)
  *  @return error code indicating result of operation. */
 errno_t iSCSIVirtualHBA::DeactivateConnection(SessionIdentifier sessionId,ConnectionIdentifier connectionId)
 {
-    // Serialize onto the workloop (see the teardown note in the header).
+    // Serialize against the workloop (see the teardown note in the header).
+    IOCommandGate * gate = GetCommandGate();
+    if(!gate)
+        return DeactivateConnectionGated(sessionId, connectionId);
+
     errno_t result = EINVAL;
-    GetCommandGate()->runAction((IOCommandGate::Action)DeactivateConnectionAction,
-                                (void *)(uintptr_t)sessionId,
-                                (void *)(uintptr_t)connectionId,
-                                &result);
+    gate->runAction((IOCommandGate::Action)DeactivateConnectionAction,
+                    (void *)(uintptr_t)sessionId,
+                    (void *)(uintptr_t)connectionId,
+                    &result);
     return result;
 }
 
-/*! Runs the body of DeactivateConnection on the workloop thread. */
+/*! Runs the body of DeactivateConnection serialized against the workloop. */
 errno_t iSCSIVirtualHBA::DeactivateConnectionGated(SessionIdentifier sessionId,ConnectionIdentifier connectionId)
 {
     if(sessionId >= kMaxSessions || connectionId >= kMaxConnectionsPerSession)
         return EINVAL;
 
-    // Do nothing if session doesn't exist
+    // Do nothing if the session table is gone (termination) or session doesn't exist
+    if(!sessionList)
+        return EINVAL;
+
     iSCSISession * session = sessionList[sessionId];
 
     if(!session)
@@ -2019,7 +2119,9 @@ errno_t iSCSIVirtualHBA::DeactivateConnectionGated(SessionIdentifier sessionId,C
 
     while((initiatorTaskTag = connection->taskQueue->completeCurrentTask()) != 0)
     {
+        IORecursiveLockLock(taskListLock);
         task = FindTaskForControllerIdentifier(sessionId, initiatorTaskTag);
+        IORecursiveLockUnlock(taskListLock);
         if(!task)
             continue;
 
@@ -2061,21 +2163,28 @@ IOReturn iSCSIVirtualHBA::DeactivateConnectionAction(OSObject * owner,
  *  @return error code indicating result of operation. */
 errno_t iSCSIVirtualHBA::DeactivateAllConnections(SessionIdentifier sessionId)
 {
-    // Serialize onto the workloop (see the teardown note in the header).
+    // Serialize against the workloop (see the teardown note in the header).
+    IOCommandGate * gate = GetCommandGate();
+    if(!gate)
+        return DeactivateAllConnectionsGated(sessionId);
+
     errno_t result = EINVAL;
-    GetCommandGate()->runAction((IOCommandGate::Action)DeactivateAllConnectionsAction,
-                                (void *)(uintptr_t)sessionId,
-                                &result);
+    gate->runAction((IOCommandGate::Action)DeactivateAllConnectionsAction,
+                    (void *)(uintptr_t)sessionId,
+                    &result);
     return result;
 }
 
-/*! Runs the body of DeactivateAllConnections on the workloop thread. */
+/*! Runs the body of DeactivateAllConnections serialized against the workloop. */
 errno_t iSCSIVirtualHBA::DeactivateAllConnectionsGated(SessionIdentifier sessionId)
 {
     if(sessionId >= kMaxSessions)
         return EINVAL;
 
-    // Do nothing if session doesn't exist
+    // Do nothing if the session table is gone (termination) or session doesn't exist
+    if(!sessionList)
+        return EINVAL;
+
     iSCSISession * session = sessionList[sessionId];
 
     if(!session)

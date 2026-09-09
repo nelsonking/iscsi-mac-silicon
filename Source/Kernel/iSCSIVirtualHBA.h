@@ -171,6 +171,7 @@ public:
     static void BeginTaskOnWorkloopThread(iSCSIVirtualHBA * owner,
                                           iSCSISession * session,
                                           iSCSIConnection * connection,
+                                          SCSIParallelTaskIdentifier parallelTask,
                                           UInt32 initiatorTaskTag);
     
     /*! Called by our software interrupt source (iSCSIIOEventSource) to let us
@@ -333,9 +334,9 @@ public:
     
 private:
 
-    /*! Runs the body of HandleTimeout on the workloop thread. HandleTimeout
-     *  itself runs in the SCSI stack timer context and dispatches here via
-     *  GetCommandGate()->runAction() so that taskQueue operations and
+    /*! Runs the body of HandleTimeout serialized against the workloop.
+     *  HandleTimeout itself runs in the SCSI stack timer context and dispatches
+     *  here via GetCommandGate()->runAction() so that taskQueue operations and
      *  connection release cannot race with the data path. */
     void HandleTimeoutGated(SCSIParallelTaskIdentifier task);
 
@@ -344,11 +345,13 @@ private:
                                         void * arg0, void * arg1,
                                         void * arg2, void * arg3);
 
-    /*! Runs the body of ProcessParallelTask on the workloop thread.
+    /*! Runs the body of ProcessParallelTask serialized against the workloop.
      *  ProcessParallelTask itself runs on the SCSI stack thread and dispatches
      *  here via GetCommandGate()->runAction() so that the base class's task
      *  list (SetControllerTaskIdentifier) and the taskQueue cannot race with
-     *  the data path. */
+     *  the data path. Note runAction executes the action on the CALLING thread
+     *  (the SCSI stack thread), holding the gate for mutual exclusion with the
+     *  workloop; it does not migrate to the workloop thread. */
     SCSIServiceResponse ProcessParallelTaskGated(SCSIParallelTaskIdentifier parallelTask);
 
     /*! Command-gate action trampoline that calls ProcessParallelTaskGated. */
@@ -361,12 +364,13 @@ private:
      *  are also reachable from the daemon's user-client thread via
      *  IOExternalMethod. Their bodies touch the base class's task pool
      *  (FindTaskForControllerIdentifier / CompleteParallelTask) and free the
-     *  connection and its embedded taskQueue, so they must run on the workloop
-     *  — otherwise they race the data path and corrupt the task pool / queue.
-     *  Each public entry point therefore dispatches its body through the
-     *  command gate onto the workloop (the "*Gated" variants). */
+     *  connection and its embedded taskQueue, so they must be serialized
+     *  against the workloop — otherwise they race the data path and corrupt the
+     *  task pool / queue. Each public entry point therefore runs its body under
+     *  the command gate (the "*Gated" variants), making them mutually exclusive
+     *  with the workloop's event sources. */
 
-    /*! Runs the body of DeactivateConnection on the workloop thread. */
+    /*! Runs the body of DeactivateConnection serialized against the workloop. */
     errno_t DeactivateConnectionGated(SessionIdentifier sessionId,
                                       ConnectionIdentifier connectionId);
 
@@ -375,7 +379,7 @@ private:
                                                void * arg0, void * arg1,
                                                void * arg2, void * arg3);
 
-    /*! Runs the body of DeactivateAllConnections on the workloop thread. */
+    /*! Runs the body of DeactivateAllConnections serialized against the workloop. */
     errno_t DeactivateAllConnectionsGated(SessionIdentifier sessionId);
 
     /*! Command-gate action trampoline that calls DeactivateAllConnectionsGated. */
@@ -383,7 +387,7 @@ private:
                                                    void * arg0, void * arg1,
                                                    void * arg2, void * arg3);
 
-    /*! Runs the body of ReleaseConnection on the workloop thread. */
+    /*! Runs the body of ReleaseConnection serialized against the workloop. */
     void ReleaseConnectionGated(SessionIdentifier sessionId,
                                 ConnectionIdentifier connectionId);
 
@@ -392,7 +396,7 @@ private:
                                             void * arg0, void * arg1,
                                             void * arg2, void * arg3);
 
-    /*! Runs the body of ReleaseSession on the workloop thread. */
+    /*! Runs the body of ReleaseSession serialized against the workloop. */
     void ReleaseSessionGated(SessionIdentifier sessionId);
 
     /*! Command-gate action trampoline that calls ReleaseSessionGated. */
@@ -400,7 +404,7 @@ private:
                                          void * arg0, void * arg1,
                                          void * arg2, void * arg3);
 
-    /*! Runs the body of ReleaseAllSessions on the workloop thread. */
+    /*! Runs the body of ReleaseAllSessions serialized against the workloop. */
     void ReleaseAllSessionsGated();
 
     /*! Command-gate action trampoline that calls ReleaseAllSessionsGated. */
@@ -542,7 +546,15 @@ private:
     
     /*! Lookup table mapping target names (IQN names) to session identifiers. */
     OSDictionary * targetList;
-    
+
+    /*! Serializes access to the base class's task queue. That queue is NOT
+     *  thread-safe, and it is touched from multiple threads: SetControllerTaskIdentifier
+     *  (BeginTaskOnWorkloopThread, workloop), FindTaskForControllerIdentifier
+     *  (data path, workloop) and CompleteParallelTask (data path + teardown, which
+     *  runs on the caller's thread via the command gate). All of those call sites
+     *  must hold this lock to avoid the "corrupt list" panic. */
+    IORecursiveLock * taskListLock;
+
     friend class iSCSITaskQueue;
 };
 

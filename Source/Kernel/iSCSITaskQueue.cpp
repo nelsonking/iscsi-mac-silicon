@@ -33,6 +33,11 @@
 struct iSCSITask {
     queue_chain_t queueChain;
     UInt32 initiatorTaskTag;
+    // The SCSI parallel task to process. NULL for latency-measurement tasks.
+    // Carried through the queue so BeginTaskOnWorkloopThread can get the task
+    // directly on the workloop, instead of calling FindTaskForControllerIdentifier
+    // (which would require the base-class task queue to already be populated).
+    SCSIParallelTaskIdentifier parallelTask;
 };
 
 OSDefineMetaClassAndStructors(iSCSITaskQueue,IOEventSource);
@@ -62,14 +67,19 @@ bool iSCSITaskQueue::init(iSCSIVirtualHBA * owner,
 }
 
 /*! Queues a new iSCSI task for delayed processing.
+ *  @param parallelTask the SCSI parallel task to process (NULL for latency).
  *  @param initiatorTaskTag the iSCSI task tag associated with the task. */
-void iSCSITaskQueue::queueTask(UInt32 initiatorTaskTag)
+void iSCSITaskQueue::queueTask(SCSIParallelTaskIdentifier parallelTask, UInt32 initiatorTaskTag)
 {
     iSCSITask * task = (iSCSITask*)IOMalloc(sizeof(iSCSITask));
     task->initiatorTaskTag = initiatorTaskTag;
+    task->parallelTask = parallelTask;
 
-    if(!onThread())
-        IOLog("iscsi: WARNING taskQueue op off workloop\n");
+    // NOTE: queueTask runs on the SCSI stack thread (dispatched via
+    // ProcessParallelTaskGated -> runAction), NOT the workloop thread. That is
+    // expected — the queue is protected by queueLock, and the base-class task
+    // queue is only touched later on the workloop. onThread() would be false
+    // here and is not a sign of a bug, so no onThread() check.
 
     IOLockLock(queueLock);
     queue_enter(&taskQueue,task,iSCSITask *,queueChain);
@@ -89,9 +99,9 @@ UInt32 iSCSITaskQueue::completeCurrentTask()
 {
     // With pipelining, checkForWork dequeues tasks at dispatch time, so this is
     // normally a no-op during steady-state I/O. It is still used by teardown
-    // (DeactivateConnection/HandleTimeout) to drain any tasks that were queued
-    // but not yet dispatched, so it must dequeue-and-return the next tag under
-    // the same lock as checkForWork.
+    // (DeactivateConnection) to drain any tasks that were queued but not yet
+    // dispatched, so it must dequeue-and-return the next tag under the same lock
+    // as checkForWork.
     UInt32 taskTag = 0;
 
     IOLockLock(queueLock);
@@ -104,6 +114,30 @@ UInt32 iSCSITaskQueue::completeCurrentTask()
     IOLockUnlock(queueLock);
 
     return taskTag;
+}
+
+bool iSCSITaskQueue::removeTask(UInt32 initiatorTaskTag)
+{
+    bool removed = false;
+
+    IOLockLock(queueLock);
+    // Walk the queue manually (not queue_iterate) because queue_remove clobbers
+    // the element's next/prev pointers, which would break the macro's advance
+    // step; save the next pointer before removing.
+    iSCSITask * task = (iSCSITask *)queue_first(&taskQueue);
+    while(!queue_end(&taskQueue, (queue_entry_t)task)) {
+        iSCSITask * next = (iSCSITask *)queue_next(&task->queueChain);
+        if(task->initiatorTaskTag == initiatorTaskTag) {
+            queue_remove(&taskQueue, task, iSCSITask *, queueChain);
+            IOFree(task, sizeof(iSCSITask));
+            removed = true;
+            break;
+        }
+        task = next;
+    }
+    IOLockUnlock(queueLock);
+
+    return removed;
 }
 
 
@@ -130,6 +164,7 @@ bool iSCSITaskQueue::checkForWork()
         while(true) {
             iSCSITask * task = NULL;
             UInt32 taskTag = 0;
+            SCSIParallelTaskIdentifier parallelTask = NULL;
 
             IOLockLock(queueLock);
             if(queue_empty(&taskQueue)) {
@@ -138,6 +173,7 @@ bool iSCSITaskQueue::checkForWork()
             }
             task = (iSCSITask *)queue_first(&taskQueue);
             taskTag = task->initiatorTaskTag;
+            parallelTask = task->parallelTask;
             queue_remove_first(&taskQueue, task, iSCSITask *, queueChain);
             IOLockUnlock(queueLock);
 
@@ -147,32 +183,10 @@ bool iSCSITaskQueue::checkForWork()
                 IOFree(task, sizeof(iSCSITask));
                 break;
             }
-            ((iSCSITaskQueue::Action)action)((iSCSIVirtualHBA*)owner,session,connection,taskTag);
+            ((iSCSITaskQueue::Action)action)((iSCSIVirtualHBA*)owner,session,connection,parallelTask,taskTag);
             IOFree(task, sizeof(iSCSITask));
         }
     }
 
     return false;
-}
-
-/*! Removes all tasks from the queue. */
-void iSCSITaskQueue::clearTasksFromQueue()
-{
-    // Ensure the event source is disabled before proceeding...
-    disable();
-
-    // Iterate over queue and clear all tasks (free memory for each task)
-    iSCSITask * task = NULL;
-
-    if(!onThread())
-        IOLog("iscsi: WARNING taskQueue op off workloop\n");
-
-    IOLockLock(queueLock);
-    while(!queue_empty(&taskQueue))
-    {
-        queue_remove_first(&taskQueue,task,iSCSITask *, queueChain);
-        if(task)
-            IOFree(task,sizeof(iSCSITask));
-    }
-    IOLockUnlock(queueLock);
 }

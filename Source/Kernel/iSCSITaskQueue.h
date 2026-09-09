@@ -57,6 +57,7 @@ public:
     typedef bool (*Action) (iSCSIVirtualHBA * owner,
                             iSCSISession * session,
                             iSCSIConnection * connection,
+                            SCSIParallelTaskIdentifier parallelTask,
                             UInt32 initiatorTaskTag);
 	
 	/*! Initializes the event source with an owner and an action.
@@ -72,17 +73,23 @@ public:
                       iSCSISession * session,
                       iSCSIConnection * connection);
     
-    /*! Queues a new iSCSI task for delayed processing. 
+    /*! Queues a new iSCSI task for delayed processing.
+     *  @param parallelTask the SCSI parallel task to process (NULL for
+     *  latency-measurement tasks).
      *  @param initiatorTaskTag the iSCSI task tag associated with the task. */
-    void queueTask(UInt32 initiatorTaskTag);
+    void queueTask(SCSIParallelTaskIdentifier parallelTask, UInt32 initiatorTaskTag);
     
-    /*! Removes a task from the queue (either the task has been successfully
-     *  completed or aborted).
-     *  @return the iSCSI task tag for the task that was just completed. */
+    /*! Dequeues and frees the task at the head of the queue, returning its
+     *  tag. Used by teardown (DeactivateConnection) to drain tasks that were
+     *  queued but not yet dispatched.
+     *  @return the iSCSI task tag of the removed task, or 0 if empty. */
     UInt32 completeCurrentTask();
-    
-    /*! Removes all tasks from the queue. */
-    void clearTasksFromQueue();
+
+    /*! Removes and frees the queued task carrying the given initiator task tag.
+     *  Used by HandleTimeout to remove the specific timed-out task (rather than
+     *  the head of the queue, which under pipelining is a different task).
+     *  @return true if a task was removed, false otherwise. */
+    bool removeTask(UInt32 initiatorTaskTag);
     
 protected:
     
@@ -102,10 +109,15 @@ private:
     
     queue_head_t taskQueue;
     
+    /*! Set by queueTask, cleared by checkForWork. Both callers hold the command
+     *  gate, so this is NOT protected by queueLock; it must never be touched
+     *  outside the gate or the race returns. */
     bool newTask;
 
-    /*! Lock protecting the task queue against concurrent queueTask (SCSI
-     *  stack thread) and checkForWork/clearTasksFromQueue (workloop) access. */
+    /*! Lock protecting the task queue against concurrent queueTask /
+     *  checkForWork / completeCurrentTask / removeTask access. These are also
+     *  serialized by the command gate, but this lock remains as defense in
+     *  depth (e.g. if a caller ever stops going through the gate). */
     IOLock * queueLock;
 
 };
