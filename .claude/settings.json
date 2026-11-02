@@ -5,7 +5,24 @@
       "Bash(ioreg -c SCSISubsystemGlobals)",
       "Bash(ioreg -n SCSISubsystemGlobals)",
       "Bash(git log *)",
-      "Bash(./build_kext.sh)"
+      "Bash(./build_kext.sh)",
+      "Bash(kmutil showloaded *)",
+      "Read(//Library/Extensions/iSCSIInitiator.kext/Contents/MacOS/**)",
+      "Bash(log show *)",
+      "Bash(echo \"\\(exit=$?\\)\")",
+      "Bash(sudo -n log show --last 10m --predicate 'eventMessage CONTAINS[c] \"iscsi\"' --info)",
+      "Bash(/usr/bin/log show *)",
+      "Bash(rtk proxy *)",
+      "Read(//private/tmp/**)",
+      "Bash(echo \"=== iscsi: 日志内容分类（排除 WARNING 后）===\"; grep \"iscsi:\" /tmp/iscsi_log.txt | grep -v \"taskQueue op off workloop\" | sed -E 's/^[0-9-]+ [0-9:.]+[+-][0-9]+ [0-9a-fx]+ +[A-Za-z]+ +[0-9a-fx]+ +[0-9]+ +[0-9]+ +[^ ]+ +//' | sed -E 's/\\\\\\(sid: [0-9]+, cid: [0-9]+\\\\\\)/\\(sid,cid\\)/g; s/task %#x/task/g; s/[0-9]+//g' | sort | uniq -c | sort -rn | head -30)",
+      "Bash(echo \"=== 1. 真正的 panic 检查（精确）===\"; grep -iE \"panic|crashed|trap|machine check\" /tmp/iscsi_log.txt | grep -iv \"RBAssertion\\\\|frontboard\" | head -5 || echo \"无 panic\"; echo; echo \"=== 2. taskQueue 警告来源定位 ===\"; grep \"taskQueue op off workloop\" /tmp/iscsi_log.txt | head -1 | sed -E 's/^\\([0-9-]+ [0-9:.]+\\).*/\\\\1/'; echo \"警告是否与 queueTask 同线程（看时间戳是否与 Queued task 交织）:\"; echo; echo \"=== 3. Bytes per second 负值样本 ===\"; grep \"Bytes per second: -\" /tmp/iscsi_log.txt | head -3; echo; echo \"=== 4. DEBUG kext 运行时间证据（DBLog 出现时间范围）===\"; grep \"Sent PDU type\" /tmp/iscsi_log.txt | head -1 | grep -oE \"^[0-9-]+ [0-9:.]+\"; grep \"Sent PDU type\" /tmp/iscsi_log.txt | tail -1 | grep -oE \"^[0-9-]+ [0-9:.]+\")",
+      "Bash(DEBUG=1 ./build_kext.sh)",
+      "Bash(python3 - /Library/Logs/DiagnosticReports/panic-full-2026-09-09-142547.0002.panic)",
+      "Bash(nm -n build/iSCSIInitiator)",
+      "Bash(awk '$1 ~ /^[0-9a-f]+$/ { a=strtonum\\(\"0x\"$1\\) } { print $0 }')",
+      "Bash(nm build/iSCSIInitiator)",
+      "Bash(atos -o build/iSCSIInitiator -arch arm64e -l 0xfffffe003cd04f30 0xfffffe003cd07050 0xfffffe003cd0bea8)",
+      "Bash(awk '{printf \"%s %s\\\\n\", $1, $3}')"
     ],
     "additionalDirectories": [
       "/tmp"

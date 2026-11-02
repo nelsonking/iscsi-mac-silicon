@@ -18,6 +18,11 @@ final class ISCSIController: ObservableObject {
     private var refreshUsers = 0
     @Published var rates: [UUID: Double] = [:]
 
+    /// 用户手动「断开」后尚未重连的 target。这些 target 的 IOMedia 节点在 kext
+    /// 异步 teardown 期间仍会残留在 IORegistry，refreshRuntime 不能据此把
+    /// .offline 翻回 .connected（否则断开后闪一下就又显示已连接、无法重连）。
+    private var disconnectedByUser: Set<UUID> = []
+
     init() {
         targets = TargetStorage.load()
         selection = targets.first?.id
@@ -108,6 +113,7 @@ final class ISCSIController: ObservableObject {
         }
         targets.removeAll { $0.id == id }
         runtime[id] = nil
+        disconnectedByUser.remove(id)
         TargetStorage.save(targets)
         if selection == id { selection = targets.first?.id }
     }
@@ -123,6 +129,7 @@ final class ISCSIController: ObservableObject {
     func connect(_ id: UUID) {
         guard let t = targets.first(where: { $0.id == id }), !busy.contains(id) else { return }
         busy.insert(id)
+        disconnectedByUser.remove(id)
         var r = rt(id); r.state = .connecting; runtime[id] = r
         Task.detached(priority: .userInitiated) {
             let result = Self.doConnect(t)
@@ -167,6 +174,7 @@ final class ISCSIController: ObservableObject {
                 var rr = TargetRuntime()
                 if !r.ok && !r.combined.lowercased().contains("not") { self.lastError = r.combined }
                 rr.state = .offline
+                self.disconnectedByUser.insert(id)
                 self.runtime[id] = rr
             }
         }
@@ -223,7 +231,10 @@ final class ISCSIController: ObservableObject {
                 var rr = self.rt(id)
                 // Preserve a fresh "connecting"/"failed" state set by an in-flight op.
                 if self.busy.contains(id) { return }
-                if let info = info {
+                // 用户刚手动断开过的 target，kext 异步 teardown 期间 IOMedia 节点
+                // 可能仍残留在 IORegistry，不能据此把 .offline 翻回 .connected。
+                // 尊重用户意图，直到再次点击连接（connect 会从 disconnectedByUser 移除）。
+                if let info = info, !self.disconnectedByUser.contains(id) {
                     rr.bsdDisk = info.disk
                     rr.mountPoint = info.mount
                     rr.volumeName = info.volume
